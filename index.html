@@ -1,0 +1,758 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>写真カレンダー</title>
+<meta name="theme-color" content="#1f6f78">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#eef1f2; --surface:#ffffff; --ink:#1b2427; --muted:#66757a; --line:#d5dcdf;
+  --accent:#1f6f78; --accent-ink:#ffffff; --sun:#c2412d; --sat:#2d62b5; --frame:#dfe5e7;
+  --ok:#2f7d4f; --warn:#b26a00; --shade:rgba(10,18,20,.55);
+  --f-body:"Zen Kaku Gothic New","Hiragino Sans","Noto Sans JP",system-ui,sans-serif;
+  --f-mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){:root{
+  --bg:#121719; --surface:#1b2225; --ink:#e4ecee; --muted:#93a3a8; --line:#2c373b;
+  --accent:#5fb3bc; --accent-ink:#0d1517; --sun:#ef7a66; --sat:#7ea8ec; --frame:#263034;
+  --ok:#6cc08d; --warn:#e3a443; --shade:rgba(0,0,0,.7); color-scheme:dark}}
+*{box-sizing:border-box}
+html{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:15px;line-height:1.6;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:16px 40px}
+img{max-width:100%}
+[hidden]{display:none!important}
+.wrap{max-width:960px;margin:0 auto;display:flex;flex-direction:column;gap:16px}
+button,input,textarea{font:inherit;color:inherit}
+button,label.btn{cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+header.top{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+header.top h1{font-size:20px;margin:0;font-weight:700;letter-spacing:.02em;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.btn{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:8px 14px;display:inline-flex;align-items:center;gap:6px;font-weight:500;user-select:none}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.danger{color:var(--sun)}
+.btn:disabled,.btn.busy{opacity:.5;pointer-events:none}
+.status{border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:4px 12px 4px 10px;font-size:13px;display:inline-flex;align-items:center;gap:6px}
+.status i{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+.status[data-s="ok"] i{background:var(--ok)}
+.status[data-s="busy"] i{background:var(--accent)}
+.status[data-s="warn"] i{background:var(--warn)}
+.vh{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden;clip:rect(0 0 0 0)}
+
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line)}
+.tabs button{border:0;background:none;padding:8px 12px;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px;font-weight:500}
+.tabs button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--accent)}
+
+.monthbar{display:flex;align-items:center;gap:8px}
+.monthbar .label{font-size:22px;font-weight:700;flex:1;font-family:var(--f-mono);letter-spacing:.02em}
+.monthbar .label small{font-family:var(--f-body);font-size:13px;color:var(--muted);font-weight:400;margin-left:8px}
+.iconbtn{width:38px;height:38px;border-radius:8px;border:1px solid var(--line);background:var(--surface);display:grid;place-items:center;font-size:18px;line-height:1}
+.iconbtn:disabled{opacity:.35}
+
+.grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:4px}
+.dow{font-size:11px;text-align:center;color:var(--muted);letter-spacing:.08em}
+.dow.sun{color:var(--sun)} .dow.sat{color:var(--sat)}
+.cell{position:relative;aspect-ratio:1/1.18;max-width:100%;border:0;padding:0;border-radius:6px;background:var(--frame);overflow:hidden;display:flex;flex-direction:column;text-align:left}
+.cell.out{background:transparent}
+.cell .ph{flex:1;min-height:0;background-size:cover;background-position:center}
+.cell .num{position:absolute;top:3px;left:5px;font-family:var(--f-mono);font-size:12px;font-weight:500;line-height:1.2}
+.cell.sun .num{color:var(--sun)} .cell.sat .num{color:var(--sat)}
+.cell.has .num{color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.6)}
+.cell.today{box-shadow:inset 0 0 0 2px var(--accent)}
+.cell .cnt{position:absolute;top:3px;right:4px;font-family:var(--f-mono);font-size:10px;background:var(--shade);color:#fff;border-radius:4px;padding:0 4px}
+.cell .ttl{font-size:11px;line-height:1.3;padding:3px 4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500}
+.cell.has .ttl,.cell.titled .ttl{background:var(--surface)}
+@media (min-width:640px){.cell .num{font-size:14px}.cell .ttl{font-size:12px}.grid{gap:6px}}
+
+.hint{border:1px dashed var(--line);border-radius:10px;padding:14px 16px;color:var(--muted);font-size:14px}
+.hint b{color:var(--ink)}
+.search,.field{width:100%;border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:10px 12px}
+.list{display:flex;flex-direction:column;gap:8px}
+.row{display:grid;grid-template-columns:72px minmax(0,1fr);gap:12px;align-items:center;border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:8px;text-align:left}
+.row .thumb{width:72px;height:72px;border-radius:6px;background:var(--frame) center/cover}
+.row .d{font-family:var(--f-mono);font-size:12px;color:var(--muted)}
+.row .t{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .m{font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.sheet{position:fixed;inset:0;background:var(--bg);z-index:10;overflow-y:auto;
+  padding-top:env(safe-area-inset-top,0px);padding-bottom:calc(32px + env(safe-area-inset-bottom,0px));
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.sheet .inner{max-width:960px;margin:0 auto;display:flex;flex-direction:column;gap:14px;padding-top:12px}
+.sheethead{display:flex;align-items:center;gap:8px}
+.sheethead .date{flex:1;min-width:0;font-family:var(--f-mono);font-size:15px;color:var(--muted)}
+.titlein{width:100%;border:0;border-bottom:1px solid var(--line);background:transparent;font-size:24px;font-weight:700;padding:4px 0}
+.titlein::placeholder,.memo::placeholder{color:var(--muted);opacity:.7}
+.memo{width:100%;min-height:72px;border:1px solid var(--line);border-radius:8px;background:var(--surface);padding:10px 12px;resize:vertical}
+.small{font-size:12px;color:var(--muted);min-height:1em}
+.photos{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px}
+@media (min-width:640px){.photos{grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}}
+.photos button{border:0;padding:0;aspect-ratio:1;max-width:100%;background:var(--frame) center/cover;border-radius:4px;position:relative}
+.photos button .cv{position:absolute;left:4px;bottom:4px;font-size:10px;background:var(--accent);color:var(--accent-ink);border-radius:3px;padding:0 5px}
+.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.settings h2{font-size:16px;margin:8px 0 0}
+.settings p{margin:0;font-size:14px;color:var(--muted)}
+.settings code{font-family:var(--f-mono);font-size:12px;word-break:break-all}
+
+.lb{position:fixed;inset:0;z-index:20;background:#0b0f10;color:#eef3f4;display:flex;flex-direction:column;
+  padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+.lb .bar{display:flex;align-items:center;gap:8px;padding:8px max(12px,env(safe-area-inset-right,0px)) 8px max(12px,env(safe-area-inset-left,0px));flex-wrap:wrap}
+.lb .bar .pos{flex:1;font-family:var(--f-mono);font-size:13px;opacity:.8}
+.lb .bar button{background:rgba(255,255,255,.1);border:0;color:#eef3f4;border-radius:8px;padding:7px 12px}
+.lb .bar button.warn{background:#a8321f}
+.lb .stage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;position:relative;touch-action:pan-y}
+.lb img{max-width:100%;max-height:100%;object-fit:contain}
+.lb .nav{position:absolute;top:50%;transform:translateY(-50%);background:rgba(255,255,255,.12);border:0;color:#fff;width:44px;height:64px;border-radius:8px;font-size:22px}
+.lb .nav:disabled{opacity:.2}
+.lb .nav.l{left:max(8px,env(safe-area-inset-left,0px))} .lb .nav.r{right:max(8px,env(safe-area-inset-right,0px))}
+@media (hover:none){.lb .nav{display:none}}
+
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(20px + env(safe-area-inset-bottom,0px));z-index:30;
+  background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:10px;font-size:14px;max-width:calc(100% - 32px);box-shadow:0 4px 16px rgba(0,0,0,.2)}
+.progress{height:4px;background:var(--line);border-radius:2px;overflow:hidden}
+.progress i{display:block;height:100%;background:var(--accent);width:0;transition:width .2s}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>写真カレンダー</h1>
+    <button class="status" id="status" data-s="off"><i></i><span id="statusText">未接続</span></button>
+    <button class="btn" id="loginBtn">ログイン</button>
+    <label class="btn primary" for="file" id="addBtn" hidden>＋ 写真を追加</label>
+  </header>
+  <div id="upload" hidden>
+    <div class="small" id="upText"></div>
+    <div class="progress"><i id="upBar"></i></div>
+  </div>
+  <div class="tabs" role="tablist">
+    <button role="tab" id="tabCal" aria-selected="true">カレンダー</button>
+    <button role="tab" id="tabList" aria-selected="false">イベント一覧</button>
+  </div>
+
+  <section id="calView">
+    <div class="monthbar">
+      <div class="label" id="monthLabel"></div>
+      <button class="iconbtn" id="prevM" aria-label="前の月">‹</button>
+      <button class="btn" id="todayBtn">今月</button>
+      <button class="iconbtn" id="nextM" aria-label="次の月">›</button>
+    </div>
+    <div style="height:10px"></div>
+    <div class="grid" id="dow"></div>
+    <div style="height:4px"></div>
+    <div class="grid" id="cal"></div>
+    <div style="height:14px"></div>
+    <div class="hint" id="hint" hidden></div>
+  </section>
+
+  <section id="listView" hidden>
+    <input class="search" id="q" type="search" placeholder="タイトル・メモで検索（例：運動会）">
+    <div style="height:10px"></div>
+    <div class="list" id="list"></div>
+  </section>
+</div>
+
+<!-- day sheet -->
+<div class="sheet" id="sheet" hidden>
+  <div class="inner">
+    <div class="sheethead">
+      <button class="iconbtn" id="closeSheet" aria-label="閉じる">×</button>
+      <div class="date" id="sheetDate"></div>
+      <button class="iconbtn" id="prevD" aria-label="前の記録">‹</button>
+      <button class="iconbtn" id="nextD" aria-label="次の記録">›</button>
+    </div>
+    <input class="titlein" id="titleIn" placeholder="タイトル（例：運動会）" maxlength="80">
+    <textarea class="memo" id="memoIn" placeholder="メモ"></textarea>
+    <div class="small" id="savedMsg"></div>
+    <div class="photos" id="photos"></div>
+    <div class="actions">
+      <label class="btn" for="file" id="addHere" hidden>＋ この日に写真を追加</label>
+    </div>
+  </div>
+</div>
+
+<!-- settings -->
+<div class="sheet settings" id="settings" hidden>
+  <div class="inner">
+    <div class="sheethead">
+      <button class="iconbtn" id="closeSettings" aria-label="閉じる">×</button>
+      <div class="date">設定</div>
+    </div>
+    <h2>GoogleのクライアントID</h2>
+    <p>Google Cloudで作ったOAuthクライアントIDを貼り付けます。手順はREADMEを参照してください。</p>
+    <input class="field" id="cidIn" placeholder="xxxxxxxx.apps.googleusercontent.com" autocomplete="off" spellcheck="false">
+    <div class="actions"><button class="btn primary" id="cidSave">保存</button><span class="small" id="cidMsg"></span></div>
+
+    <h2>同期</h2>
+    <p id="syncInfo">未接続</p>
+    <div class="actions">
+      <button class="btn" id="syncNow">今すぐ同期</button>
+      <button class="btn" id="logout">ログアウト</button>
+    </div>
+    <p>写真とデータはGoogleドライブの <code>PhotoCalendar</code> フォルダに保存されます（<code>photos/</code> に写真、<code>index.json</code> にタイトル・メモ）。アプリがなくても、ドライブから直接見られます。</p>
+
+    <h2>この端末のキャッシュ</h2>
+    <p id="cacheInfo">—</p>
+    <div class="actions">
+      <button class="btn danger" id="clearCache">キャッシュを削除</button>
+      <button class="btn danger" id="clearCacheYes" hidden>削除する（ドライブのデータは残ります）</button>
+    </div>
+  </div>
+</div>
+
+<!-- lightbox -->
+<div class="lb" id="lb" hidden>
+  <div class="bar">
+    <div class="pos" id="lbPos"></div>
+    <button id="lbCover" hidden>表紙にする</button>
+    <button id="lbDel" hidden>削除</button>
+    <button id="lbDelYes" class="warn" hidden>本当に削除</button>
+    <button id="lbClose">閉じる</button>
+  </div>
+  <div class="stage" id="stage">
+    <img id="lbImg" alt="">
+    <button class="nav l" id="lbPrev" aria-label="前の写真">‹</button>
+    <button class="nav r" id="lbNext" aria-label="次の写真">›</button>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+<input type="file" id="file" class="vh" accept="image/*" multiple>
+
+<script>
+"use strict";
+/* =========================================================
+   写真カレンダー — single-file PWA
+   Data: Google Drive folder "PhotoCalendar" (index.json + photos/ + thumbs/)
+   Local: IndexedDB cache (index + image blobs) for offline viewing
+   ========================================================= */
+const APP_FOLDER = 'PhotoCalendar';
+const SCOPE = 'https://www.googleapis.com/auth/drive.file';
+const DRIVE = 'https://www.googleapis.com/drive/v3';
+const UPLOAD = 'https://www.googleapis.com/upload/drive/v3';
+const FULL_PX = 2048, THUMB_PX = 480;
+
+const $ = id => document.getElementById(id);
+const WD = ['日','月','火','水','木','金','土'];
+const pad = n => String(n).padStart(2,'0');
+const keyOf = (y,m,d) => `${y}-${pad(m)}-${pad(d)}`;
+const parseKey = k => { const [y,m,d] = k.split('-').map(Number); return {y,m,d}; };
+const fmtDate = k => { const {y,m,d} = parseKey(k); return `${y}年${m}月${d}日（${WD[new Date(y,m-1,d).getDay()]}）`; };
+const clone = o => JSON.parse(JSON.stringify(o));
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const ls = {
+  get(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
+  set(k,v){ try{ localStorage.setItem(k,v); }catch(e){} },
+  del(k){ try{ localStorage.removeItem(k); }catch(e){} },
+};
+function toast(msg, ms=2800){ const t=$('toast'); t.textContent=msg; t.hidden=false; clearTimeout(toast._t); toast._t=setTimeout(()=>t.hidden=true, ms); }
+function todayKey(){ const n=new Date(); return keyOf(n.getFullYear(), n.getMonth()+1, n.getDate()); }
+
+/* ---------------- IndexedDB ---------------- */
+let _idb;
+function idb(){
+  return _idb ||= new Promise((res, rej) => {
+    const r = indexedDB.open('photocal', 1);
+    r.onupgradeneeded = () => { r.result.createObjectStore('kv'); r.result.createObjectStore('blobs'); };
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  });
+}
+async function idbOp(store, mode, fn){
+  const d = await idb();
+  return new Promise((res, rej) => {
+    const tx = d.transaction(store, mode); const q = fn(tx.objectStore(store));
+    tx.oncomplete = () => res(q && q.result); tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error);
+  });
+}
+const idbGet = (s,k) => idbOp(s,'readonly', st => st.get(k));
+const idbPut = (s,k,v) => idbOp(s,'readwrite', st => st.put(v,k));
+const idbDel = (s,k) => idbOp(s,'readwrite', st => st.delete(k));
+const idbClear = s => idbOp(s,'readwrite', st => st.clear());
+const idbCount = s => idbOp(s,'readonly', st => st.count());
+
+/* ---------------- Data model & merge ----------------
+   index = { version:1, days:{ "YYYY-MM-DD": {title, memo, photos:[{id,thumb,taken,w,h}], removed:[ids], updatedAt} },
+             deleted:{ "YYYY-MM-DD": ts } }                                  */
+const emptyIndex = () => ({version:1, days:{}, deleted:{}});
+let local = emptyIndex();
+let dirty = false, editSeq = 0;
+
+function mergeDay(x, y){
+  if(!x) return clone(y); if(!y) return clone(x);
+  const [n, o] = (x.updatedAt||0) >= (y.updatedAt||0) ? [x, y] : [y, x];
+  const removed = [...new Set([...(n.removed||[]), ...(o.removed||[])])];
+  const have = new Set((n.photos||[]).map(p => p.id));
+  const extra = (o.photos||[]).filter(p => !have.has(p.id)).sort((a,b) => (a.taken||'').localeCompare(b.taken||''));
+  const photos = [...(n.photos||[]), ...extra].filter(p => !removed.includes(p.id));
+  return {...clone(n), photos: clone(photos), removed};
+}
+function merge(a, b){
+  const out = emptyIndex();
+  const keys = new Set([...Object.keys(a.days||{}), ...Object.keys(b.days||{}), ...Object.keys(a.deleted||{}), ...Object.keys(b.deleted||{})]);
+  for(const k of [...keys].sort()){
+    const da = a.days?.[k], db = b.days?.[k];
+    const tomb = Math.max(a.deleted?.[k]||0, b.deleted?.[k]||0);
+    const day = (da || db) ? mergeDay(da, db) : null;
+    if(day && (day.updatedAt||0) > tomb) out.days[k] = day;
+    else if(tomb) out.deleted[k] = tomb;
+  }
+  return out;
+}
+function normalize(ix){
+  const o = emptyIndex();
+  for(const k of Object.keys(ix.days||{}).sort()) o.days[k] = ix.days[k];
+  for(const k of Object.keys(ix.deleted||{}).sort()) o.deleted[k] = ix.deleted[k];
+  return JSON.stringify(o);
+}
+const isEmptyDay = d => !d.title && !(d.memo||'').trim() && !(d.photos||[]).length;
+function blank(k){ return {date:k, title:'', memo:'', photos:[], removed:[]}; }
+
+async function saveLocal(){ try{ await idbPut('kv','index',local); await idbPut('kv','dirty',dirty); }catch(e){} }
+
+function writeDay(k, fn){
+  const cur = clone(local.days[k] || blank(k));
+  const next = fn(cur); next.date = k; next.updatedAt = Date.now();
+  if(isEmptyDay(next)){ delete local.days[k]; local.deleted[k] = next.updatedAt; }
+  else { local.days[k] = next; delete local.deleted[k]; }
+  dirty = true; editSeq++;
+  saveLocal(); renderAll(); scheduleSync();
+}
+
+/* ---------------- Google auth ---------------- */
+let clientId = ls.get('photocal.clientId') || '';
+let token = null, tokenClient = null;
+try{ const t = JSON.parse(ls.get('photocal.token')||'null'); if(t && t.exp > Date.now()) token = t; }catch(e){}
+const hasToken = () => !!(token && token.exp > Date.now());
+
+function initGis(){
+  if(!clientId || !(window.google && google.accounts && google.accounts.oauth2)) return;
+  tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: clientId, scope: SCOPE,
+    callback: r => {
+      if(r.error){ toast('ログインできませんでした: ' + r.error, 5000); return; }
+      token = {v: r.access_token, exp: Date.now() + (Number(r.expires_in||3600) - 60)*1000};
+      ls.set('photocal.token', JSON.stringify(token));
+      folders = null; updateConn(); syncNow();
+    },
+    error_callback: e => { if(e && e.type !== 'popup_closed') toast('ログイン画面を開けませんでした（' + (e.type||'error') + '）', 5000); },
+  });
+}
+window.onGisLoad = initGis;
+function login(){
+  if(!clientId){ openSettings(); toast('先にGoogleのクライアントIDを設定してください', 4000); return; }
+  if(!tokenClient){ initGis(); if(!tokenClient){ toast('Googleの読み込み中です。少し待ってからもう一度押してください'); return; } }
+  tokenClient.requestAccessToken({prompt: ''});
+}
+function logout(){
+  if(token && window.google?.accounts?.oauth2) try{ google.accounts.oauth2.revoke(token.v, ()=>{}); }catch(e){}
+  token = null; ls.del('photocal.token'); folders = null; updateConn(); toast('ログアウトしました');
+}
+
+/* ---------------- Drive API ---------------- */
+let folders = null; // {root, photos, thumbs, indexId}
+async function api(url, opts={}){
+  if(!hasToken()){ updateConn(); throw {code:'auth'}; }
+  const r = await fetch(url, {...opts, headers:{...(opts.headers||{}), Authorization:'Bearer ' + token.v}});
+  if(r.status === 401){ token = null; ls.del('photocal.token'); updateConn(); throw {code:'auth'}; }
+  if(!r.ok){ let t=''; try{ t = await r.text(); }catch(e){} throw {code:'http', status:r.status, text:t}; }
+  return r;
+}
+async function findFile(name, parent, folder){
+  const q = [`name='${name}'`, 'trashed=false', parent ? `'${parent}' in parents` : null,
+    folder ? "mimeType='application/vnd.google-apps.folder'" : "mimeType!='application/vnd.google-apps.folder'"].filter(Boolean).join(' and ');
+  const r = await api(`${DRIVE}/files?q=${encodeURIComponent(q)}&fields=files(id,modifiedTime)&orderBy=modifiedTime desc&spaces=drive`);
+  const j = await r.json(); return j.files && j.files[0] ? j.files[0].id : null;
+}
+async function folderId(name, parent){
+  const id = await findFile(name, parent, true); if(id) return id;
+  const r = await api(`${DRIVE}/files?fields=id`, {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({name, mimeType:'application/vnd.google-apps.folder', ...(parent ? {parents:[parent]} : {})})});
+  return (await r.json()).id;
+}
+async function ensureFolders(){
+  if(folders) return folders;
+  const root = await folderId(APP_FOLDER, null);
+  const [photos, thumbs, indexId] = await Promise.all([folderId('photos', root), folderId('thumbs', root), findFile('index.json', root, false)]);
+  return folders = {root, photos, thumbs, indexId};
+}
+function multipart(meta, blob){
+  const b = 'pc' + Math.random().toString(36).slice(2);
+  return { type: `multipart/related; boundary=${b}`,
+    body: new Blob([`--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${b}\r\nContent-Type: ${blob.type}\r\n\r\n`, blob, `\r\n--${b}--`]) };
+}
+async function uploadBlob(blob, name, parent){
+  const m = multipart({name, parents:[parent]}, blob);
+  const r = await api(`${UPLOAD}/files?uploadType=multipart&fields=id`, {method:'POST', headers:{'Content-Type':m.type}, body:m.body});
+  return (await r.json()).id;
+}
+async function readRemoteIndex(){
+  if(!folders.indexId) return null;
+  try{ const r = await api(`${DRIVE}/files/${folders.indexId}?alt=media`); return await r.json(); }
+  catch(e){ if(e.code === 'http' && e.status === 404){ folders.indexId = null; return null; } throw e; }
+}
+async function writeRemoteIndex(ix){
+  const blob = new Blob([JSON.stringify(ix)], {type:'application/json'});
+  if(folders.indexId){
+    await api(`${UPLOAD}/files/${folders.indexId}?uploadType=media`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:blob});
+  } else {
+    folders.indexId = await uploadBlob(blob, 'index.json', folders.root);
+  }
+}
+async function trashFile(id){ try{ await api(`${DRIVE}/files/${id}`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({trashed:true})}); }catch(e){} }
+
+/* ---------------- Sync ---------------- */
+let syncing = null, syncTimer = null, lastSync = Number(ls.get('photocal.lastSync')||0), syncError = '';
+function scheduleSync(ms=1500){ clearTimeout(syncTimer); syncTimer = setTimeout(syncNow, ms); }
+function syncNow(){
+  if(syncing) { syncing.then(() => scheduleSync(300)); return syncing; }
+  syncing = doSync().finally(() => { syncing = null; updateConn(); });
+  return syncing;
+}
+async function doSync(){
+  if(!hasToken() || !navigator.onLine){ updateConn(); return; }
+  setStatus('busy', '同期中…');
+  const seq = editSeq;
+  try{
+    await ensureFolders();
+    const remote = (await readRemoteIndex()) || emptyIndex();
+    const merged = merge(local, remote);
+    if(normalize(merged) !== normalize(remote)) await writeRemoteIndex(merged);
+    local = merge(local, merged);           // keep edits made while we were awaiting
+    if(editSeq === seq) dirty = false; else scheduleSync(500);
+    lastSync = Date.now(); ls.set('photocal.lastSync', String(lastSync)); syncError = '';
+    await saveLocal(); renderAll();
+  }catch(e){
+    if(e.code !== 'auth') syncError = e.status ? `エラー ${e.status}` : '通信エラー';
+  }
+}
+
+/* ---------------- Image cache / loader ---------------- */
+const urlCache = new Map(), pending = new Map();
+let active = 0; const waiters = [];
+async function limit(fn){
+  if(active >= 4) await new Promise(r => waiters.push(r));
+  active++; try{ return await fn(); } finally { active--; const w = waiters.shift(); if(w) w(); }
+}
+function imgUrl(id){
+  if(!id) return Promise.resolve(null);
+  if(urlCache.has(id)) return Promise.resolve(urlCache.get(id));
+  if(pending.has(id)) return pending.get(id);
+  const p = (async () => {
+    let blob = null;
+    try{ blob = await idbGet('blobs', id); }catch(e){}
+    if(!blob){
+      if(!hasToken()) return null;
+      try{ blob = await limit(() => api(`${DRIVE}/files/${id}?alt=media`).then(r => r.blob())); }catch(e){ return null; }
+      try{ await idbPut('blobs', id, blob); }catch(e){}
+    }
+    const u = URL.createObjectURL(blob); urlCache.set(id, u); return u;
+  })().finally(() => pending.delete(id));
+  pending.set(id, p); return p;
+}
+function hydrate(root){
+  root.querySelectorAll('[data-img]').forEach(el => {
+    const id = el.dataset.img; if(el.dataset.loaded === id) return;
+    imgUrl(id).then(u => { if(u && el.dataset.img === id){ el.style.backgroundImage = `url("${u}")`; el.dataset.loaded = id; } });
+  });
+}
+
+/* ---------------- UI: status ---------------- */
+function setStatus(s, text){ $('status').dataset.s = s; $('statusText').textContent = text; }
+function updateConn(){
+  const on = hasToken();
+  $('loginBtn').hidden = on; $('addBtn').hidden = !on; $('addHere').hidden = !on;
+  const t = lastSync ? new Date(lastSync) : null;
+  const ts = t ? `${t.getMonth()+1}/${t.getDate()} ${pad(t.getHours())}:${pad(t.getMinutes())}` : '';
+  if(syncing) return;
+  if(!clientId) setStatus('warn', '未設定');
+  else if(!navigator.onLine) setStatus('warn', 'オフライン');
+  else if(!on) setStatus(dirty ? 'warn' : 'off', dirty ? '未同期あり' : '未接続');
+  else if(syncError) setStatus('warn', syncError);
+  else if(dirty) setStatus('busy', '同期待ち');
+  else setStatus('ok', ts ? `同期 ${ts}` : '接続済み');
+  $('syncInfo').textContent = on ? `ログイン中。最終同期: ${ts || 'まだ'}` : `未ログイン。最終同期: ${ts || 'まだ'}`;
+  renderHint();
+}
+window.addEventListener('online', () => { updateConn(); scheduleSync(300); });
+window.addEventListener('offline', updateConn);
+document.addEventListener('visibilitychange', () => { if(document.visibilityState === 'visible' && hasToken()) scheduleSync(300); });
+
+/* ---------------- UI: calendar ---------------- */
+const now = new Date();
+let viewY = now.getFullYear(), viewM = now.getMonth()+1;
+$('dow').innerHTML = WD.map((w,i) => `<div class="dow ${i===0?'sun':i===6?'sat':''}">${w}</div>`).join('');
+function renderCal(){
+  $('monthLabel').innerHTML = `${viewY}.${pad(viewM)}<small>${viewY}年${viewM}月</small>`;
+  const first = new Date(viewY, viewM-1, 1).getDay(), n = new Date(viewY, viewM, 0).getDate();
+  const cells = Math.ceil((first+n)/7)*7, tk = todayKey(), out = [];
+  for(let i=0;i<cells;i++){
+    const d = i-first+1;
+    if(d<1 || d>n){ out.push('<div class="cell out"></div>'); continue; }
+    const k = keyOf(viewY,viewM,d), b = local.days[k], w = i%7;
+    const ph = b && b.photos && b.photos[0];
+    const cls = ['cell', w===0?'sun':w===6?'sat':'', ph?'has':'', b&&b.title?'titled':'', k===tk?'today':''].join(' ');
+    const cnt = b && b.photos && b.photos.length ? `<span class="cnt">${b.photos.length}</span>` : '';
+    const ttl = b && b.title ? esc(b.title) : '';
+    out.push(`<button class="${cls}" data-k="${k}" aria-label="${fmtDate(k)} ${ttl}"><div class="ph" ${ph?`data-img="${ph.thumb||ph.id}"`:''}></div><span class="num">${d}</span>${cnt}<div class="ttl">${ttl||'&nbsp;'}</div></button>`);
+  }
+  $('cal').innerHTML = out.join(''); hydrate($('cal'));
+}
+$('cal').addEventListener('click', e => { const b = e.target.closest('button.cell'); if(b) openDay(b.dataset.k); });
+$('prevM').onclick = () => { if(--viewM < 1){ viewM = 12; viewY--; } renderCal(); };
+$('nextM').onclick = () => { if(++viewM > 12){ viewM = 1; viewY++; } renderCal(); };
+$('todayBtn').onclick = () => { viewY = now.getFullYear(); viewM = now.getMonth()+1; renderCal(); };
+
+/* swipe months on the calendar */
+let cx = null, cy = null;
+$('cal').addEventListener('touchstart', e => { cx = e.touches[0].clientX; cy = e.touches[0].clientY; }, {passive:true});
+$('cal').addEventListener('touchend', e => {
+  if(cx == null) return; const dx = e.changedTouches[0].clientX - cx, dy = e.changedTouches[0].clientY - cy; cx = null;
+  if(Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy)*1.5) (dx < 0 ? $('nextM') : $('prevM')).click();
+});
+
+/* ---------------- UI: list ---------------- */
+function contentKeys(){ return Object.keys(local.days).sort(); }
+function renderList(){
+  const q = $('q').value.trim().toLowerCase();
+  const keys = contentKeys().reverse().filter(k => !q || ((local.days[k].title||'') + ' ' + (local.days[k].memo||'')).toLowerCase().includes(q));
+  $('list').innerHTML = keys.length ? keys.map(k => { const b = local.days[k], ph = b.photos && b.photos[0];
+    return `<button class="row" data-k="${k}"><div class="thumb" ${ph?`data-img="${ph.thumb||ph.id}"`:''}></div><div style="min-width:0"><div class="d">${fmtDate(k)} · ${(b.photos||[]).length}枚</div><div class="t">${esc(b.title||'（タイトルなし）')}</div>${b.memo?`<div class="m">${esc(b.memo)}</div>`:''}</div></button>`; }).join('')
+    : `<div class="hint">${q ? '該当する記録はありません。' : 'まだ記録がありません。'}</div>`;
+  hydrate($('list'));
+}
+$('list').addEventListener('click', e => { const b = e.target.closest('button.row'); if(b) openDay(b.dataset.k); });
+$('q').addEventListener('input', renderList);
+function setTab(list){ $('tabCal').setAttribute('aria-selected', String(!list)); $('tabList').setAttribute('aria-selected', String(list)); $('calView').hidden = list; $('listView').hidden = !list; if(list) renderList(); }
+$('tabCal').onclick = () => setTab(false); $('tabList').onclick = () => setTab(true);
+
+function renderHint(){
+  const h = $('hint');
+  if(!clientId){ h.hidden = false; h.innerHTML = 'はじめに<b>設定</b>（右上の「未設定」）からGoogleのクライアントIDを登録し、<b>ログイン</b>してください。'; return; }
+  if(!contentKeys().length){ h.hidden = false; h.innerHTML = hasToken()
+    ? '<b>写真を追加</b>から写真を選ぶと、撮影日のマスに自動で入ります。日付をタップするとタイトル（例：運動会）とメモを付けられます。'
+    : '<b>ログイン</b>すると、ドライブに保存した写真と記録が表示されます。'; return; }
+  h.hidden = true;
+}
+function renderAll(){ renderCal(); if(!$('listView').hidden) renderList(); renderHint(); if(openDate) renderDay(); if(lbIndex >= 0) renderLb(); updateConn(); }
+
+/* ---------------- UI: day sheet ---------------- */
+let openDate = null, pendingText = false, textTimer = null;
+function openDay(k){
+  openDate = k; const {y,m} = parseKey(k); viewY = y; viewM = m;
+  $('sheet').hidden = false; document.body.style.overflow = 'hidden';
+  $('titleIn').value = local.days[k]?.title || ''; $('memoIn').value = local.days[k]?.memo || '';
+  $('savedMsg').textContent = ''; renderDay(); $('sheet').scrollTop = 0;
+}
+function closeDay(){ flushText(); openDate = null; $('sheet').hidden = true; document.body.style.overflow = ''; renderCal(); }
+function renderDay(){
+  const b = local.days[openDate] || {};
+  $('sheetDate').textContent = fmtDate(openDate);
+  if(!pendingText && document.activeElement !== $('titleIn')) $('titleIn').value = b.title || '';
+  if(!pendingText && document.activeElement !== $('memoIn')) $('memoIn').value = b.memo || '';
+  const ps = b.photos || [];
+  $('photos').innerHTML = ps.map((p,i) => `<button data-i="${i}" data-img="${p.thumb||p.id}" aria-label="写真 ${i+1}">${i===0?'<span class="cv">表紙</span>':''}</button>`).join('');
+  hydrate($('photos'));
+  const ks = contentKeys();
+  const prev = ks.filter(x => x < openDate).pop(), next = ks.find(x => x > openDate);
+  $('prevD').disabled = !prev; $('nextD').disabled = !next;
+  $('prevD').onclick = () => { if(prev){ flushText(); openDay(prev); } };
+  $('nextD').onclick = () => { if(next){ flushText(); openDay(next); } };
+}
+$('closeSheet').onclick = closeDay;
+$('photos').addEventListener('click', e => { const b = e.target.closest('button[data-i]'); if(b) openLb(+b.dataset.i); });
+function onText(){ pendingText = true; $('savedMsg').textContent = '入力中…'; clearTimeout(textTimer); textTimer = setTimeout(flushText, 900); }
+function flushText(){
+  if(!pendingText || !openDate) return; clearTimeout(textTimer); pendingText = false;
+  const title = $('titleIn').value.trim(), memo = $('memoIn').value;
+  const cur = local.days[openDate] || blank(openDate);
+  if(cur.title === title && (cur.memo||'') === memo){ $('savedMsg').textContent = ''; return; }
+  writeDay(openDate, c => ({...c, title, memo}));
+  $('savedMsg').textContent = hasToken() ? '保存しました' : 'この端末に保存しました（ログイン後にドライブへ同期します）';
+}
+$('titleIn').addEventListener('input', onText); $('memoIn').addEventListener('input', onText);
+$('titleIn').addEventListener('blur', flushText); $('memoIn').addEventListener('blur', flushText);
+
+/* ---------------- Photo import ---------------- */
+let forceDate = null, importing = false;
+$('addBtn').addEventListener('click', () => { forceDate = null; $('file').value = ''; });
+$('addHere').addEventListener('click', () => { forceDate = openDate; $('file').value = ''; });
+$('file').addEventListener('change', () => { const fs = [...$('file').files]; if(fs.length) importFiles(fs, forceDate); });
+
+async function exifInfo(file){
+  try{
+    const v = new DataView(await file.slice(0, 256*1024).arrayBuffer());
+    if(v.byteLength < 4 || v.getUint16(0) !== 0xFFD8) return null;
+    let o = 2;
+    while(o + 10 < v.byteLength){
+      const mk = v.getUint16(o); if((mk & 0xFF00) !== 0xFF00) return null;
+      if(mk === 0xFFE1 && v.getUint32(o+4) === 0x45786966) return tiffDate(v, o+10);
+      if(mk === 0xFFDA) return null;
+      o += 2 + v.getUint16(o+2);
+    }
+  }catch(e){}
+  return null;
+}
+function tiffDate(v, t){
+  const le = v.getUint16(t) === 0x4949;
+  const g16 = p => v.getUint16(p, le), g32 = p => v.getUint32(p, le);
+  const tags = p => { const r = {}, n = g16(p); for(let i=0;i<n;i++){ const e = p+2+i*12; r[g16(e)] = e; } return r; };
+  const ascii = e => { const c = g32(e+4), off = c > 4 ? t + g32(e+8) : e+8; let s=''; for(let i=0;i<c-1;i++) s += String.fromCharCode(v.getUint8(off+i)); return s; };
+  const t0 = tags(t + g32(t+4)); let s = null;
+  if(t0[0x8769]){ const ex = tags(t + g32(t0[0x8769]+8)); if(ex[0x9003]) s = ascii(ex[0x9003]); else if(ex[0x9004]) s = ascii(ex[0x9004]); }
+  if(!s && t0[0x0132]) s = ascii(t0[0x0132]);
+  const m = s && s.match(/^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2})/);
+  return m && m[1] !== '0000' ? {date:`${m[1]}-${m[2]}-${m[3]}`, time:`${m[4]}:${m[5]}`} : null;
+}
+function nameInfo(name){
+  const m = name.match(/(20\d{2})(\d{2})(\d{2})[_-]?(\d{2})(\d{2})/);
+  if(!m || +m[2] < 1 || +m[2] > 12 || +m[3] < 1 || +m[3] > 31) return null;
+  return {date:`${m[1]}-${m[2]}-${m[3]}`, time:`${m[4]}:${m[5]}`};
+}
+function mtimeInfo(f){ const d = new Date(f.lastModified || Date.now()); return {date:keyOf(d.getFullYear(), d.getMonth()+1, d.getDate()), time:`${pad(d.getHours())}:${pad(d.getMinutes())}`}; }
+async function shrink(bmp, max, q){
+  const s = Math.min(1, max / Math.max(bmp.width, bmp.height));
+  const w = Math.round(bmp.width*s), h = Math.round(bmp.height*s);
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const ctx = c.getContext('2d'); ctx.imageSmoothingQuality = 'high'; ctx.drawImage(bmp, 0, 0, w, h);
+  const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', q));
+  if(!blob) throw new Error('encode');
+  return {blob, w, h};
+}
+async function withRetry(fn){ try{ return await fn(); }catch(e){ if(e.code === 'auth') throw e; await new Promise(r => setTimeout(r, 1500)); return fn(); } }
+
+async function importFiles(files, fixed){
+  if(importing) return;
+  if(!hasToken()){ toast('写真の追加にはGoogleへのログインが必要です'); return; }
+  if(!navigator.onLine){ toast('オフラインのため写真を追加できません'); return; }
+  importing = true; $('addBtn').classList.add('busy'); $('addHere').classList.add('busy'); $('upload').hidden = false;
+  const byDate = {}; let done = 0, failed = 0, authLost = false;
+  const step = () => { $('upText').textContent = `アップロード中 ${done}/${files.length}（画面を閉じないでください）`; $('upBar').style.width = (done/files.length*100) + '%'; };
+  step();
+  try{ await ensureFolders(); }catch(e){ failed = files.length; done = files.length; }
+  for(const f of (folders ? files : [])){
+    try{
+      const info = (await exifInfo(f)) || nameInfo(f.name) || mtimeInfo(f);
+      const date = fixed || info.date;
+      let bmp; try{ bmp = await createImageBitmap(f, {imageOrientation:'from-image'}); }catch(e){ bmp = await createImageBitmap(f); }
+      const full = await shrink(bmp, FULL_PX, .86), th = await shrink(bmp, THUMB_PX, .8);
+      if(bmp.close) bmp.close();
+      const base = `${date}_${info.time.replace(':','')}_${Math.random().toString(36).slice(2,7)}.jpg`;
+      const id = await withRetry(() => uploadBlob(full.blob, base, folders.photos));
+      const thumb = await withRetry(() => uploadBlob(th.blob, base, folders.thumbs));
+      try{ await idbPut('blobs', id, full.blob); await idbPut('blobs', thumb, th.blob); }catch(e){}
+      (byDate[date] ||= []).push({id, thumb, taken:`${info.date} ${info.time}`, w:full.w, h:full.h});
+    }catch(e){ failed++; if(e && e.code === 'auth'){ authLost = true; failed += files.length - done - 1; done = files.length; break; } }
+    done++; step();
+  }
+  const dates = Object.keys(byDate).sort();
+  for(const k of dates){
+    writeDay(k, cur => {
+      const add = byDate[k].sort((a,b) => a.taken.localeCompare(b.taken));
+      if(!cur.photos.length) return {...cur, photos: add};
+      return {...cur, photos: [cur.photos[0], ...[...cur.photos.slice(1), ...add].sort((a,b) => (a.taken||'').localeCompare(b.taken||''))]};
+    });
+  }
+  if(dates.length) await syncNow();
+  importing = false; $('addBtn').classList.remove('busy'); $('addHere').classList.remove('busy'); $('upload').hidden = true;
+  const n = files.length - failed;
+  let msg = n ? `${n}枚を${dates.length}日分に追加しました` : '写真を追加できませんでした';
+  if(failed) msg += authLost ? `。ログインの期限が切れたため${failed}枚が未追加です。ログインし直してから追加してください`
+                             : `。${failed}枚は読み込めませんでした（HEICなど未対応の形式か通信エラー）`;
+  toast(msg, failed ? 7000 : 3000);
+  if(!openDate && dates.length){ const {y,m} = parseKey(dates[dates.length-1]); viewY = y; viewM = m; renderCal(); }
+}
+
+/* ---------------- Lightbox ---------------- */
+let lbIndex = -1;
+function openLb(i){ lbIndex = i; $('lb').hidden = false; renderLb(); }
+function closeLb(){ lbIndex = -1; $('lb').hidden = true; $('lbImg').removeAttribute('src'); }
+function renderLb(){
+  const ps = (local.days[openDate] || {}).photos || [];
+  if(!ps.length){ closeLb(); return; }
+  if(lbIndex >= ps.length) lbIndex = ps.length - 1;
+  const p = ps[lbIndex];
+  $('lbPos').textContent = `${lbIndex+1} / ${ps.length}${p.taken ? '  ·  ' + p.taken.slice(11) : ''}`;
+  $('lbImg').dataset.id = p.id;
+  imgUrl(p.thumb).then(u => { if(u && $('lbImg').dataset.id === p.id && !$('lbImg').dataset.full) $('lbImg').src = u; });
+  $('lbImg').dataset.full = '';
+  imgUrl(p.id).then(u => { if(u && $('lbImg').dataset.id === p.id){ $('lbImg').src = u; $('lbImg').dataset.full = '1'; } });
+  $('lbCover').hidden = lbIndex === 0;
+  $('lbDel').hidden = false; $('lbDelYes').hidden = true;
+  $('lbPrev').disabled = lbIndex === 0; $('lbNext').disabled = lbIndex === ps.length - 1;
+}
+function lbGo(d){ const ps = (local.days[openDate] || {}).photos || []; const j = lbIndex + d; if(j >= 0 && j < ps.length){ lbIndex = j; renderLb(); } }
+$('lbClose').onclick = closeLb; $('lbPrev').onclick = () => lbGo(-1); $('lbNext').onclick = () => lbGo(1);
+$('lbCover').onclick = () => { const i = lbIndex; writeDay(openDate, c => { c.photos.unshift(c.photos.splice(i,1)[0]); return c; }); lbIndex = 0; renderLb(); toast('表紙にしました'); };
+$('lbDel').onclick = () => { $('lbDel').hidden = true; $('lbDelYes').hidden = false; };
+$('lbDelYes').onclick = () => {
+  const p = (local.days[openDate].photos || [])[lbIndex]; if(!p) return;
+  writeDay(openDate, c => ({...c, photos: c.photos.filter(x => x.id !== p.id), removed: [...(c.removed||[]), p.id]}));
+  for(const id of [p.id, p.thumb]) if(id){ idbDel('blobs', id).catch(()=>{}); if(hasToken()) trashFile(id); }
+  toast(hasToken() ? '削除しました（ドライブのゴミ箱に移動）' : '削除しました');
+};
+let tx = null;
+$('stage').addEventListener('touchstart', e => { tx = e.touches[0].clientX; }, {passive:true});
+$('stage').addEventListener('touchend', e => { if(tx == null) return; const dx = e.changedTouches[0].clientX - tx; tx = null; if(Math.abs(dx) > 50) lbGo(dx < 0 ? 1 : -1); });
+document.addEventListener('keydown', e => {
+  if(lbIndex >= 0){ if(e.key === 'ArrowLeft') lbGo(-1); else if(e.key === 'ArrowRight') lbGo(1); else if(e.key === 'Escape') closeLb(); return; }
+  if(/INPUT|TEXTAREA/.test(document.activeElement.tagName)) return;
+  if(e.key === 'Escape'){ if(!$('settings').hidden) closeSettings(); else if(openDate) closeDay(); }
+});
+/* Android back button closes overlays */
+function pushOverlay(){ try{ history.pushState({o:1}, ''); }catch(e){} }
+window.addEventListener('popstate', () => { if(lbIndex >= 0) closeLb(); else if(!$('settings').hidden) closeSettings(); else if(openDate) closeDay(); });
+const _openDay = openDay; openDay = k => { if(!openDate) pushOverlay(); _openDay(k); };
+const _openLb = openLb; openLb = i => { pushOverlay(); _openLb(i); };
+const viaBack = fn => () => { if(history.state && history.state.o) history.back(); else fn(); };
+$('closeSheet').onclick = viaBack(closeDay);
+$('lbClose').onclick = viaBack(closeLb);
+
+/* ---------------- Settings ---------------- */
+function openSettings(){ $('cidIn').value = clientId; $('cidMsg').textContent = ''; $('clearCacheYes').hidden = true; $('clearCache').hidden = false; $('settings').hidden = false; document.body.style.overflow = 'hidden'; updateConn(); cacheInfo(); pushOverlay(); }
+function closeSettings(){ $('settings').hidden = true; if(!openDate) document.body.style.overflow = ''; }
+async function cacheInfo(){
+  let s = '';
+  try{ const n = await idbCount('blobs'); s = `画像 ${n}件をこの端末に保存中`; }catch(e){ s = '取得できません'; }
+  try{ const est = await navigator.storage.estimate(); s += `（約${Math.round((est.usage||0)/1048576)}MB）`; }catch(e){}
+  $('cacheInfo').textContent = s;
+}
+$('status').onclick = openSettings; $('closeSettings').onclick = viaBack(closeSettings);
+$('cidSave').onclick = () => {
+  const v = $('cidIn').value.trim();
+  if(v && !/\.apps\.googleusercontent\.com$/.test(v)){ $('cidMsg').textContent = '「.apps.googleusercontent.com」で終わるIDを入力してください'; return; }
+  clientId = v; ls.set('photocal.clientId', v); tokenClient = null; initGis();
+  $('cidMsg').textContent = '保存しました'; updateConn();
+};
+$('syncNow').onclick = () => { if(!hasToken()) login(); else syncNow(); };
+$('logout').onclick = logout;
+$('loginBtn').onclick = login;
+$('clearCache').onclick = () => { $('clearCache').hidden = true; $('clearCacheYes').hidden = false; };
+$('clearCacheYes').onclick = async () => {
+  try{ await idbClear('blobs'); }catch(e){}
+  urlCache.forEach(u => URL.revokeObjectURL(u)); urlCache.clear();
+  $('clearCacheYes').hidden = true; $('clearCache').hidden = false; cacheInfo(); renderAll(); toast('キャッシュを削除しました');
+};
+
+/* ---------------- Boot ---------------- */
+(async () => {
+  try{
+    const ix = await idbGet('kv','index'); if(ix && ix.days) local = ix;
+    dirty = !!(await idbGet('kv','dirty'));
+  }catch(e){}
+  renderAll();
+  try{ navigator.storage && navigator.storage.persist && navigator.storage.persist(); }catch(e){}
+  if(hasToken()) syncNow();
+})();
+if('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(()=>{});
+</script>
+<script src="https://accounts.google.com/gsi/client" async defer onload="onGisLoad()"></script>
+</body>
+</html>
