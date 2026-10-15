@@ -1,5 +1,5 @@
 // 写真カレンダー service worker: app shell offline cache (network-first).
-const CACHE = 'photocal-v1';
+const CACHE = 'photocal-v2';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon.svg', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {

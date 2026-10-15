@@ -107,8 +107,10 @@ header.top h1{font-size:20px;margin:0;font-weight:700;letter-spacing:.02em;flex:
 .lb .bar .pos{flex:1;font-family:var(--f-mono);font-size:13px;opacity:.8}
 .lb .bar button{background:rgba(255,255,255,.1);border:0;color:#eef3f4;border-radius:8px;padding:7px 12px}
 .lb .bar button.warn{background:#a8321f}
-.lb .stage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;position:relative;touch-action:pan-y}
-.lb img{max-width:100%;max-height:100%;object-fit:contain}
+.lb .stage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;position:relative;touch-action:none;overflow:hidden;user-select:none}
+.lb img{max-width:100%;max-height:100%;object-fit:contain;transform-origin:50% 50%;-webkit-user-drag:none;pointer-events:none}
+.lb .stage.zoomed{cursor:grab}
+.lb .zoomhint{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);font-size:12px;opacity:.55;pointer-events:none;white-space:nowrap}
 .lb .nav{position:absolute;top:50%;transform:translateY(-50%);background:rgba(255,255,255,.12);border:0;color:#fff;width:44px;height:64px;border-radius:8px;font-size:22px}
 .lb .nav:disabled{opacity:.2}
 .lb .nav.l{left:max(8px,env(safe-area-inset-left,0px))} .lb .nav.r{right:max(8px,env(safe-area-inset-right,0px))}
@@ -191,6 +193,16 @@ header.top h1{font-size:20px;margin:0;font-weight:700;letter-spacing:.02em;flex:
     <input class="field" id="cidIn" placeholder="xxxxxxxx.apps.googleusercontent.com" autocomplete="off" spellcheck="false">
     <div class="actions"><button class="btn primary" id="cidSave">保存</button><span class="small" id="cidMsg"></span></div>
 
+    <h2>写真の保存サイズ</h2>
+    <p>これから追加する写真の長辺です。大きいほど拡大してもきれいですが、ドライブの容量を多く使います。</p>
+    <div class="actions">
+      <select class="field" id="sizeSel" style="width:auto">
+        <option value="2048">2048px（標準・約0.6MB/枚）</option>
+        <option value="3072">3072px（高画質・約1.3MB/枚）</option>
+        <option value="4096">4096px（最高・約2.2MB/枚）</option>
+      </select>
+    </div>
+
     <h2>同期</h2>
     <p id="syncInfo">未接続</p>
     <div class="actions">
@@ -218,7 +230,8 @@ header.top h1{font-size:20px;margin:0;font-weight:700;letter-spacing:.02em;flex:
     <button id="lbClose">閉じる</button>
   </div>
   <div class="stage" id="stage">
-    <img id="lbImg" alt="">
+    <img id="lbImg" alt="" draggable="false">
+    <div class="zoomhint" id="zoomHint">ピンチ・ダブルタップで拡大</div>
     <button class="nav l" id="lbPrev" aria-label="前の写真">‹</button>
     <button class="nav r" id="lbNext" aria-label="次の写真">›</button>
   </div>
@@ -238,7 +251,8 @@ const APP_FOLDER = 'PhotoCalendar';
 const SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const DRIVE = 'https://www.googleapis.com/drive/v3';
 const UPLOAD = 'https://www.googleapis.com/upload/drive/v3';
-const FULL_PX = 2048, THUMB_PX = 480;
+const THUMB_PX = 480;
+const fullPx = () => Number(ls.get('photocal.fullPx')) || 2048;
 
 const $ = id => document.getElementById(id);
 const WD = ['日','月','火','水','木','金','土'];
@@ -642,7 +656,7 @@ async function importFiles(files, fixed){
       const info = (await exifInfo(f)) || nameInfo(f.name) || mtimeInfo(f);
       const date = fixed || info.date;
       let bmp; try{ bmp = await createImageBitmap(f, {imageOrientation:'from-image'}); }catch(e){ bmp = await createImageBitmap(f); }
-      const full = await shrink(bmp, FULL_PX, .86), th = await shrink(bmp, THUMB_PX, .8);
+      const full = await shrink(bmp, fullPx(), .86), th = await shrink(bmp, THUMB_PX, .8);
       if(bmp.close) bmp.close();
       const base = `${date}_${info.time.replace(':','')}_${Math.random().toString(36).slice(2,7)}.jpg`;
       const id = await withRetry(() => uploadBlob(full.blob, base, folders.photos));
@@ -673,13 +687,14 @@ async function importFiles(files, fixed){
 /* ---------------- Lightbox ---------------- */
 let lbIndex = -1;
 function openLb(i){ lbIndex = i; $('lb').hidden = false; renderLb(); }
-function closeLb(){ lbIndex = -1; $('lb').hidden = true; $('lbImg').removeAttribute('src'); }
+function closeLb(){ resetZoom(); lbIndex = -1; $('lb').hidden = true; $('lbImg').removeAttribute('src'); }
 function renderLb(){
   const ps = (local.days[openDate] || {}).photos || [];
   if(!ps.length){ closeLb(); return; }
   if(lbIndex >= ps.length) lbIndex = ps.length - 1;
   const p = ps[lbIndex];
   $('lbPos').textContent = `${lbIndex+1} / ${ps.length}${p.taken ? '  ·  ' + p.taken.slice(11) : ''}`;
+  if($('lbImg').dataset.id !== p.id) resetZoom();
   $('lbImg').dataset.id = p.id;
   imgUrl(p.thumb).then(u => { if(u && $('lbImg').dataset.id === p.id && !$('lbImg').dataset.full) $('lbImg').src = u; });
   $('lbImg').dataset.full = '';
@@ -698,9 +713,100 @@ $('lbDelYes').onclick = () => {
   for(const id of [p.id, p.thumb]) if(id){ idbDel('blobs', id).catch(()=>{}); if(hasToken()) trashFile(id); }
   toast(hasToken() ? '削除しました（ドライブのゴミ箱に移動）' : '削除しました');
 };
-let tx = null;
-$('stage').addEventListener('touchstart', e => { tx = e.touches[0].clientX; }, {passive:true});
-$('stage').addEventListener('touchend', e => { if(tx == null) return; const dx = e.changedTouches[0].clientX - tx; tx = null; if(Math.abs(dx) > 50) lbGo(dx < 0 ? 1 : -1); });
+/* ---- pinch / double-tap / wheel zoom, pan, and swipe between photos ---- */
+const Z = {s:1, x:0, y:0};
+const MAXZ = 6;
+const ptrs = new Map();
+let gesture = null, lastTap = {t:0, x:0, y:0};
+function stageBox(){ const r = $('stage').getBoundingClientRect(); return {cx: r.left + r.width/2, cy: r.top + r.height/2, W: r.width, H: r.height}; }
+function clampPan(){
+  const img = $('lbImg'), {W, H} = stageBox();
+  const mx = Math.max(0, (img.clientWidth*Z.s - W)/2), my = Math.max(0, (img.clientHeight*Z.s - H)/2);
+  Z.x = Math.min(mx, Math.max(-mx, Z.x)); Z.y = Math.min(my, Math.max(-my, Z.y));
+}
+function applyZoom(anim){
+  if(Z.s <= 1.001){ Z.s = 1; Z.x = 0; Z.y = 0; }
+  clampPan();
+  const img = $('lbImg');
+  img.style.transition = anim ? 'transform .2s ease-out' : 'none';
+  img.style.transform = Z.s === 1 ? '' : `translate(${Z.x}px,${Z.y}px) scale(${Z.s})`;
+  $('stage').classList.toggle('zoomed', Z.s > 1);
+  $('zoomHint').hidden = Z.s > 1 || !matchMedia('(hover:none)').matches;
+}
+function resetZoom(){ Z.s = 1; Z.x = 0; Z.y = 0; ptrs.clear(); gesture = null; applyZoom(false); }
+/* zoom to scale s keeping screen point (px,py) fixed */
+function zoomAt(s, px, py, anim){
+  const {cx, cy} = stageBox();
+  s = Math.min(MAXZ, Math.max(1, s));
+  const lx = (px - cx - Z.x) / Z.s, ly = (py - cy - Z.y) / Z.s;
+  Z.x = px - cx - lx*s; Z.y = py - cy - ly*s; Z.s = s;
+  applyZoom(anim);
+}
+const pts = () => [...ptrs.values()];
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const mid = (a, b) => ({x:(a.x + b.x)/2, y:(a.y + b.y)/2});
+function startGesture(){
+  const p = pts();
+  if(p.length >= 2){
+    const m = mid(p[0], p[1]);
+    gesture = {type:'pinch', d0: dist(p[0], p[1]) || 1, s0: Z.s, lx: (m.x - stageBox().cx - Z.x)/Z.s, ly: (m.y - stageBox().cy - Z.y)/Z.s};
+  } else if(p.length === 1){
+    gesture = {type: Z.s > 1 ? 'pan' : 'swipe', x0: p[0].x, y0: p[0].y, zx: Z.x, zy: Z.y, t0: Date.now(), moved: false};
+  } else gesture = null;
+}
+$('stage').addEventListener('pointerdown', e => {
+  if(e.target.closest('button')) return;
+  $('stage').setPointerCapture(e.pointerId);
+  ptrs.set(e.pointerId, {x: e.clientX, y: e.clientY});
+  startGesture();
+});
+$('stage').addEventListener('pointermove', e => {
+  if(!ptrs.has(e.pointerId)) return;
+  ptrs.set(e.pointerId, {x: e.clientX, y: e.clientY});
+  const p = pts(); if(!gesture) return;
+  if(gesture.type === 'pinch' && p.length >= 2){
+    const {cx, cy} = stageBox(), m = mid(p[0], p[1]);
+    const s = Math.min(MAXZ, Math.max(0.8, gesture.s0 * dist(p[0], p[1]) / gesture.d0));
+    Z.s = s; Z.x = m.x - cx - gesture.lx*s; Z.y = m.y - cy - gesture.ly*s;
+    const img = $('lbImg'); img.style.transition = 'none';
+    img.style.transform = `translate(${Z.x}px,${Z.y}px) scale(${Z.s})`;
+  } else if(gesture.type === 'pan'){
+    Z.x = gesture.zx + (p[0].x - gesture.x0); Z.y = gesture.zy + (p[0].y - gesture.y0);
+    if(Math.hypot(p[0].x - gesture.x0, p[0].y - gesture.y0) > 8) gesture.moved = true;
+    applyZoom(false);
+  } else if(gesture.type === 'swipe'){
+    const dx = p[0].x - gesture.x0;
+    if(Math.abs(dx) > 8) gesture.moved = true;
+    const img = $('lbImg'); img.style.transition = 'none'; img.style.transform = `translateX(${dx*0.6}px)`;
+  }
+});
+function endPointer(e){
+  if(!ptrs.has(e.pointerId)) return;
+  const last = ptrs.get(e.pointerId); ptrs.delete(e.pointerId);
+  const g = gesture;
+  if(g && g.type === 'pinch'){
+    if(ptrs.size === 0 || ptrs.size === 1){ applyZoom(true); startGesture(); if(gesture) gesture.moved = true; }
+    return;
+  }
+  if(g && g.type === 'swipe'){
+    const dx = last.x - g.x0, dy = last.y - g.y0;
+    $('lbImg').style.transition = 'transform .15s ease-out'; $('lbImg').style.transform = '';
+    if(Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)){ lbGo(dx < 0 ? 1 : -1); gesture = null; return; }
+  }
+  // tap / double-tap
+  if(g && !g.moved && e.type === 'pointerup'){
+    const now = Date.now();
+    if(now - lastTap.t < 300 && Math.hypot(last.x - lastTap.x, last.y - lastTap.y) < 30){
+      if(Z.s > 1) { Z.s = 1; applyZoom(true); } else zoomAt(2.5, last.x, last.y, true);
+      lastTap.t = 0;
+    } else lastTap = {t: now, x: last.x, y: last.y};
+  }
+  startGesture();
+}
+$('stage').addEventListener('pointerup', endPointer);
+$('stage').addEventListener('pointercancel', endPointer);
+$('stage').addEventListener('wheel', e => { e.preventDefault(); zoomAt(Z.s * Math.exp(-e.deltaY * 0.0015), e.clientX, e.clientY, false); }, {passive:false});
+window.addEventListener('resize', () => { if(lbIndex >= 0) applyZoom(false); });
 document.addEventListener('keydown', e => {
   if(lbIndex >= 0){ if(e.key === 'ArrowLeft') lbGo(-1); else if(e.key === 'ArrowRight') lbGo(1); else if(e.key === 'Escape') closeLb(); return; }
   if(/INPUT|TEXTAREA/.test(document.activeElement.tagName)) return;
@@ -716,7 +822,7 @@ $('closeSheet').onclick = viaBack(closeDay);
 $('lbClose').onclick = viaBack(closeLb);
 
 /* ---------------- Settings ---------------- */
-function openSettings(){ $('cidIn').value = clientId; $('cidMsg').textContent = ''; $('clearCacheYes').hidden = true; $('clearCache').hidden = false; $('settings').hidden = false; document.body.style.overflow = 'hidden'; updateConn(); cacheInfo(); pushOverlay(); }
+function openSettings(){ $('sizeSel').value = String(fullPx()); $('cidIn').value = clientId; $('cidMsg').textContent = ''; $('clearCacheYes').hidden = true; $('clearCache').hidden = false; $('settings').hidden = false; document.body.style.overflow = 'hidden'; updateConn(); cacheInfo(); pushOverlay(); }
 function closeSettings(){ $('settings').hidden = true; if(!openDate) document.body.style.overflow = ''; }
 async function cacheInfo(){
   let s = '';
@@ -731,6 +837,7 @@ $('cidSave').onclick = () => {
   clientId = v; ls.set('photocal.clientId', v); tokenClient = null; initGis();
   $('cidMsg').textContent = '保存しました'; updateConn();
 };
+$('sizeSel').onchange = () => { ls.set('photocal.fullPx', $('sizeSel').value); toast('保存サイズを変更しました（これから追加する写真に適用）'); };
 $('syncNow').onclick = () => { if(!hasToken()) login(); else syncNow(); };
 $('logout').onclick = logout;
 $('loginBtn').onclick = login;
