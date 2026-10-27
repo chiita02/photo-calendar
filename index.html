@@ -116,6 +116,24 @@ header.top h1{font-size:20px;margin:0;font-weight:700;letter-spacing:.02em;flex:
 .lb .nav.l{left:max(8px,env(safe-area-inset-left,0px))} .lb .nav.r{right:max(8px,env(safe-area-inset-right,0px))}
 @media (hover:none){.lb .nav{display:none}}
 
+.pick-group{display:flex;flex-direction:column;gap:8px}
+.pick-head{display:flex;align-items:center;gap:8px;position:sticky;top:0;background:var(--bg);padding:6px 0;z-index:1}
+.pick-head .d{flex:1;min-width:0;font-weight:700}
+.pick-head .d small{font-weight:400;color:var(--muted);margin-left:6px;font-family:var(--f-mono)}
+.tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:3px}
+@media (min-width:640px){.tiles{grid-template-columns:repeat(6,minmax(0,1fr))}}
+.tile,.photos button{position:relative}
+.tile{border:0;padding:0;aspect-ratio:1;max-width:100%;background:var(--frame) center/cover;border-radius:3px;overflow:hidden}
+.tile.off{opacity:.45}
+.tile.bad::after{content:"未対応";position:absolute;inset:auto 0 0 0;font-size:10px;background:var(--shade);color:#fff;padding:1px 0}
+.chk{position:absolute;top:0;right:0;width:40px;height:40px;display:grid;place-items:center}
+.chk::before{content:"";width:22px;height:22px;border-radius:50%;border:2px solid #fff;background:rgba(0,0,0,.25);box-shadow:0 0 2px rgba(0,0,0,.5)}
+.chk::after{content:"✓";position:absolute;color:var(--accent-ink);font-size:13px;font-weight:700;opacity:0}
+.on>.chk::before{background:var(--accent);border-color:var(--accent)}
+.on>.chk::after{opacity:1}
+.photos.selecting button:not(.on){opacity:.55}
+.dock{position:sticky;bottom:0;display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:var(--bg);border-top:1px solid var(--line);padding:10px 0 calc(10px + env(safe-area-inset-bottom,0px));margin-top:4px;z-index:2}
+.dock .grow{flex:1;min-width:0;font-weight:500}
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(20px + env(safe-area-inset-bottom,0px));z-index:30;
   background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:10px;font-size:14px;max-width:calc(100% - 32px);box-shadow:0 4px 16px rgba(0,0,0,.2)}
 .progress{height:4px;background:var(--line);border-radius:2px;overflow:hidden}
@@ -128,6 +146,7 @@ header.top h1{font-size:20px;margin:0;font-weight:700;letter-spacing:.02em;flex:
   <header class="top">
     <h1>写真カレンダー</h1>
     <button class="status" id="status" data-s="off"><i></i><span id="statusText">未接続</span></button>
+    <button class="iconbtn" id="gearBtn" aria-label="設定">⚙</button>
     <button class="btn" id="loginBtn">ログイン</button>
     <label class="btn primary" for="file" id="addBtn" hidden>＋ 写真を追加</label>
   </header>
@@ -175,8 +194,32 @@ header.top h1{font-size:20px;margin:0;font-weight:700;letter-spacing:.02em;flex:
     <textarea class="memo" id="memoIn" placeholder="メモ"></textarea>
     <div class="small" id="savedMsg"></div>
     <div class="photos" id="photos"></div>
-    <div class="actions">
+    <div class="actions" id="dayActions">
       <label class="btn" for="file" id="addHere" hidden>＋ この日に写真を追加</label>
+      <button class="btn" id="shareMode">写真を共有</button>
+    </div>
+    <div class="dock" id="shareBar" hidden>
+      <span class="grow" id="shareCount"></span>
+      <button class="btn" id="shareAll">すべて選択</button>
+      <button class="btn" id="shareCancel">キャンセル</button>
+      <button class="btn primary" id="shareGo">共有</button>
+    </div>
+  </div>
+</div>
+
+<!-- picker: review selected files before upload -->
+<div class="sheet" id="picker" hidden>
+  <div class="inner">
+    <div class="sheethead">
+      <button class="iconbtn" id="closePicker" aria-label="閉じる">×</button>
+      <div class="date">追加する写真を選ぶ</div>
+      <button class="btn" id="pickAll">すべて解除</button>
+    </div>
+    <div class="small" id="pickInfo">写真をタップすると拡大して確認できます。右上の丸で選択を切り替えます。</div>
+    <div id="pickGroups" style="display:flex;flex-direction:column;gap:16px"></div>
+    <div class="dock">
+      <span class="grow" id="pickCount"></span>
+      <button class="btn primary" id="pickAdd">追加</button>
     </div>
   </div>
 </div>
@@ -224,6 +267,8 @@ header.top h1{font-size:20px;margin:0;font-weight:700;letter-spacing:.02em;flex:
 <div class="lb" id="lb" hidden>
   <div class="bar">
     <div class="pos" id="lbPos"></div>
+    <button id="lbPick" hidden></button>
+    <button id="lbShare" hidden>共有</button>
     <button id="lbCover" hidden>表紙にする</button>
     <button id="lbDel" hidden>削除</button>
     <button id="lbDelYes" class="warn" hidden>本当に削除</button>
@@ -449,7 +494,7 @@ async function doSync(){
 }
 
 /* ---------------- Image cache / loader ---------------- */
-const urlCache = new Map(), pending = new Map();
+const urlCache = new Map(), pending = new Map(), blobCache = new Map();
 let active = 0; const waiters = [];
 async function limit(fn){
   if(active >= 4) await new Promise(r => waiters.push(r));
@@ -467,10 +512,40 @@ function imgUrl(id){
       try{ blob = await limit(() => api(`${DRIVE}/files/${id}?alt=media`).then(r => r.blob())); }catch(e){ return null; }
       try{ await idbPut('blobs', id, blob); }catch(e){}
     }
+    blobCache.set(id, blob);
     const u = URL.createObjectURL(blob); urlCache.set(id, u); return u;
   })().finally(() => pending.delete(id));
   pending.set(id, p); return p;
 }
+async function getBlob(id){ if(!blobCache.has(id)) await imgUrl(id); return blobCache.get(id) || null; }
+
+/* ---------------- Share (LINE etc. via the OS share sheet) ---------------- */
+async function shareIds(ids, date){
+  if(!ids.length) return;
+  if(!ids.every(id => blobCache.has(id))){
+    toast('写真を準備しています…', 10000);
+    const bs = await Promise.all(ids.map(getBlob));
+    if(bs.some(b => !b)){ toast('写真を読み込めませんでした。ログインと通信状態を確認してください', 5000); return; }
+    toast('準備ができました。もう一度「共有」を押してください', 5000);
+    return;
+  }
+  const files = ids.map((id, i) => new File([blobCache.get(id)], `${date}_${pad(i+1)}.jpg`, {type:'image/jpeg'}));
+  if(navigator.canShare && navigator.canShare({files})){
+    try{ await navigator.share({files}); return true; }
+    catch(e){
+      if(e.name === 'AbortError') return false;
+      if(e.name === 'NotAllowedError'){ toast('もう一度「共有」を押してください'); return false; }
+      toast('共有できませんでした（' + e.name + '）', 5000); return false;
+    }
+  }
+  for(const f of files){
+    const a = document.createElement('a'); a.href = URL.createObjectURL(f); a.download = f.name;
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+  }
+  toast('このブラウザは共有に対応していないため、ダウンロードしました', 5000);
+  return true;
+}
+
 function hydrate(root){
   root.querySelectorAll('[data-img]').forEach(el => {
     const id = el.dataset.img; if(el.dataset.loaded === id) return;
@@ -549,7 +624,7 @@ $('tabCal').onclick = () => setTab(false); $('tabList').onclick = () => setTab(t
 
 function renderHint(){
   const h = $('hint');
-  if(!clientId){ h.hidden = false; h.innerHTML = 'はじめに<b>設定</b>（右上の「未設定」）からGoogleのクライアントIDを登録し、<b>ログイン</b>してください。'; return; }
+  if(!clientId){ h.hidden = false; h.innerHTML = 'はじめに<b>設定</b>（右上の ⚙ ）からGoogleのクライアントIDを登録し、<b>ログイン</b>してください。'; return; }
   if(!contentKeys().length){ h.hidden = false; h.innerHTML = hasToken()
     ? '<b>写真を追加</b>から写真を選ぶと、撮影日のマスに自動で入ります。日付をタップするとタイトル（例：運動会）とメモを付けられます。'
     : '<b>ログイン</b>すると、ドライブに保存した写真と記録が表示されます。'; return; }
@@ -565,14 +640,19 @@ function openDay(k){
   $('titleIn').value = local.days[k]?.title || ''; $('memoIn').value = local.days[k]?.memo || '';
   $('savedMsg').textContent = ''; renderDay(); $('sheet').scrollTop = 0;
 }
-function closeDay(){ flushText(); openDate = null; $('sheet').hidden = true; document.body.style.overflow = ''; renderCal(); }
+function closeDay(){ flushText(); exitShare(); openDate = null; $('sheet').hidden = true; document.body.style.overflow = ''; renderCal(); }
 function renderDay(){
   const b = local.days[openDate] || {};
   $('sheetDate').textContent = fmtDate(openDate);
   if(!pendingText && document.activeElement !== $('titleIn')) $('titleIn').value = b.title || '';
   if(!pendingText && document.activeElement !== $('memoIn')) $('memoIn').value = b.memo || '';
   const ps = b.photos || [];
-  $('photos').innerHTML = ps.map((p,i) => `<button data-i="${i}" data-img="${p.thumb||p.id}" aria-label="写真 ${i+1}">${i===0?'<span class="cv">表紙</span>':''}</button>`).join('');
+  if(shareSel) for(const id of [...shareSel]) if(!ps.some(p => p.id === id)) shareSel.delete(id);
+  $('photos').classList.toggle('selecting', !!shareSel);
+  $('photos').innerHTML = ps.map((p,i) => `<button data-i="${i}" data-img="${p.thumb||p.id}" class="${shareSel && shareSel.has(p.id) ? 'on' : ''}" aria-label="写真 ${i+1}">${i===0?'<span class="cv">表紙</span>':''}${shareSel ? '<span class="chk"></span>' : ''}</button>`).join('');
+  $('shareMode').hidden = !ps.length || !!shareSel;
+  $('shareBar').hidden = !shareSel;
+  if(shareSel){ $('shareCount').textContent = `${shareSel.size}枚を選択`; $('shareGo').disabled = !shareSel.size; $('shareAll').textContent = shareSel.size === ps.length ? 'すべて解除' : 'すべて選択'; }
   hydrate($('photos'));
   const ks = contentKeys();
   const prev = ks.filter(x => x < openDate).pop(), next = ks.find(x => x > openDate);
@@ -581,7 +661,29 @@ function renderDay(){
   $('nextD').onclick = () => { if(next){ flushText(); openDay(next); } };
 }
 $('closeSheet').onclick = closeDay;
-$('photos').addEventListener('click', e => { const b = e.target.closest('button[data-i]'); if(b) openLb(+b.dataset.i); });
+let shareSel = null;
+$('photos').addEventListener('click', e => {
+  const b = e.target.closest('button[data-i]'); if(!b) return;
+  if(shareSel){
+    const p = local.days[openDate].photos[+b.dataset.i];
+    if(shareSel.has(p.id)) shareSel.delete(p.id); else shareSel.add(p.id);
+    renderDay(); return;
+  }
+  openLb(+b.dataset.i);
+});
+function exitShare(){ shareSel = null; if(openDate) renderDay(); }
+$('shareMode').onclick = () => {
+  const ps = (local.days[openDate] || {}).photos || [];
+  shareSel = new Set(); renderDay();
+  ps.forEach(p => getBlob(p.id));            // preload so the share sheet opens on the first tap
+  toast('共有する写真をタップして選んでください');
+};
+$('shareAll').onclick = () => { const ps = local.days[openDate].photos; shareSel = shareSel.size === ps.length ? new Set() : new Set(ps.map(p => p.id)); renderDay(); };
+$('shareCancel').onclick = exitShare;
+$('shareGo').onclick = async () => {
+  const ids = local.days[openDate].photos.filter(p => shareSel.has(p.id)).map(p => p.id);
+  if(await shareIds(ids, openDate)) exitShare();
+};
 function onText(){ pendingText = true; $('savedMsg').textContent = '入力中…'; clearTimeout(textTimer); textTimer = setTimeout(flushText, 900); }
 function flushText(){
   if(!pendingText || !openDate) return; clearTimeout(textTimer); pendingText = false;
@@ -598,7 +700,93 @@ $('titleIn').addEventListener('blur', flushText); $('memoIn').addEventListener('
 let forceDate = null, importing = false;
 $('addBtn').addEventListener('click', () => { forceDate = null; $('file').value = ''; });
 $('addHere').addEventListener('click', () => { forceDate = openDate; $('file').value = ''; });
-$('file').addEventListener('change', () => { const fs = [...$('file').files]; if(fs.length) importFiles(fs, forceDate); });
+$('file').addEventListener('change', () => { const fs = [...$('file').files]; if(fs.length) openPicker(fs, forceDate); });
+
+let picks = [], pickFixed = null, pickRun = 0;
+function openPicker(files, fixed){
+  closePicker();
+  pickFixed = fixed; const run = ++pickRun;
+  picks = files.map((file, n) => ({n, file, url: URL.createObjectURL(file), thumb: null, info: null, sel: true, bad: false}));
+  $('picker').hidden = false; document.body.style.overflow = 'hidden'; $('picker').scrollTop = 0;
+  pushOverlay();
+  $('pickGroups').innerHTML = `<div class="hint">${files.length}枚を読み込み中…</div>`; renderPickCount();
+  (async () => {
+    for(const it of picks){ it.info = (await exifInfo(it.file)) || nameInfo(it.file.name) || mtimeInfo(it.file); if(run !== pickRun) return; }
+    picks.sort((a, b) => ((pickFixed || a.info.date) + a.info.time).localeCompare((pickFixed || b.info.date) + b.info.time));
+    renderPicker();
+    let next = 0;
+    const worker = async () => {
+      while(next < picks.length && run === pickRun){
+        const it = picks[next++];
+        try{
+          let bmp;
+          try{ bmp = await createImageBitmap(it.file, {imageOrientation:'from-image', resizeWidth: 360, resizeQuality:'medium'}); }
+          catch(e){ bmp = await createImageBitmap(it.file); }
+          const r = Math.min(1, 360 / bmp.width), c = document.createElement('canvas');
+          c.width = Math.round(bmp.width * r); c.height = Math.round(bmp.height * r);
+          c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height); if(bmp.close) bmp.close();
+          const b = await new Promise(res => c.toBlob(res, 'image/jpeg', .75));
+          if(run !== pickRun) return;
+          it.thumb = URL.createObjectURL(b);
+        }catch(e){ it.bad = true; it.sel = false; }
+        const el = document.querySelector(`#pickGroups .tile[data-n="${it.n}"]`);
+        if(el){ if(it.thumb) el.style.backgroundImage = `url("${it.thumb}")`; el.classList.toggle('bad', it.bad); el.classList.toggle('on', it.sel); el.classList.toggle('off', !it.sel); }
+        renderPickCount();
+      }
+    };
+    await Promise.all([worker(), worker()]);
+  })();
+}
+function closePicker(){
+  if($('picker').hidden && !picks.length) return;
+  pickRun++;
+  for(const it of picks){ URL.revokeObjectURL(it.url); if(it.thumb) URL.revokeObjectURL(it.thumb); }
+  picks = []; $('picker').hidden = true; $('pickGroups').innerHTML = '';
+  if(!openDate && $('settings').hidden) document.body.style.overflow = '';
+}
+function renderPicker(){
+  const groups = {};
+  picks.forEach((it, i) => { (groups[pickFixed || it.info.date] ||= []).push(i); });
+  $('pickGroups').innerHTML = Object.keys(groups).sort().map(d => `
+    <div class="pick-group">
+      <div class="pick-head"><div class="d">${fmtDate(d)}<small data-gc="${d}"></small></div><button class="btn" data-gall="${d}">この日を切り替え</button></div>
+      <div class="tiles">${groups[d].map(i => { const it = picks[i];
+        return `<button class="tile ${it.sel ? 'on' : 'off'} ${it.bad ? 'bad' : ''}" data-n="${it.n}" data-i="${i}" ${it.thumb ? `style="background-image:url('${it.thumb}')"` : ''} aria-label="${it.info.time}"><span class="chk"></span></button>`; }).join('')}</div>
+    </div>`).join('');
+  if(pickFixed) $('pickInfo').textContent = 'すべて ' + fmtDate(pickFixed) + ' に追加します。写真をタップすると拡大、右上の丸で選択を切り替えます。';
+  else $('pickInfo').textContent = '撮影日ごとに分けて追加します。写真をタップすると拡大、右上の丸で選択を切り替えます。';
+  renderPickCount();
+}
+function renderPickCount(){
+  const sel = picks.filter(it => it.sel).length;
+  $('pickCount').textContent = `${sel} / ${picks.length}枚を選択`;
+  $('pickAdd').disabled = !sel;
+  $('pickAll').textContent = sel === picks.filter(it => !it.bad).length && sel ? 'すべて解除' : 'すべて選択';
+  document.querySelectorAll('#pickGroups [data-gc]').forEach(el => {
+    const d = el.dataset.gc, items = picks.filter(it => it.info && (pickFixed || it.info.date) === d);
+    el.textContent = `${items.filter(it => it.sel).length}/${items.length}`;
+  });
+}
+function setPick(it, v){
+  if(it.bad) v = false; it.sel = v;
+  const el = document.querySelector(`#pickGroups .tile[data-n="${it.n}"]`);
+  if(el){ el.classList.toggle('on', v); el.classList.toggle('off', !v); }
+}
+$('pickGroups').addEventListener('click', e => {
+  const g = e.target.closest('[data-gall]');
+  if(g){ const items = picks.filter(it => (pickFixed || it.info.date) === g.dataset.gall && !it.bad); const v = !items.every(it => it.sel); items.forEach(it => setPick(it, v)); renderPickCount(); return; }
+  const t = e.target.closest('.tile'); if(!t) return;
+  const it = picks[+t.dataset.i];
+  if(e.target.closest('.chk')){ setPick(it, !it.sel); renderPickCount(); return; }
+  openLb(+t.dataset.i, 'pick');
+});
+$('pickAll').onclick = () => { const ok = picks.filter(it => !it.bad); const v = !ok.every(it => it.sel); ok.forEach(it => setPick(it, v)); renderPickCount(); };
+$('pickAdd').onclick = () => {
+  const files = picks.filter(it => it.sel).map(it => it.file), fixed = pickFixed;
+  if(!files.length) return;
+  viaBack(closePicker)();
+  setTimeout(() => importFiles(files, fixed), 50);
+};
 
 async function exifInfo(file){
   try{
@@ -685,13 +873,25 @@ async function importFiles(files, fixed){
 }
 
 /* ---------------- Lightbox ---------------- */
-let lbIndex = -1;
-function openLb(i){ lbIndex = i; $('lb').hidden = false; renderLb(); }
-function closeLb(){ resetZoom(); lbIndex = -1; $('lb').hidden = true; $('lbImg').removeAttribute('src'); }
+let lbIndex = -1, lbMode = 'day';
+const lbList = () => lbMode === 'pick' ? picks : ((local.days[openDate] || {}).photos || []);
+function openLb(i, mode){ lbMode = mode || 'day'; lbIndex = i; $('lb').hidden = false; renderLb(); }
+function closeLb(){ resetZoom(); $('lbImg').dataset.id = ''; lbIndex = -1; $('lb').hidden = true; $('lbImg').removeAttribute('src'); }
 function renderLb(){
-  const ps = (local.days[openDate] || {}).photos || [];
+  const ps = lbList();
   if(!ps.length){ closeLb(); return; }
   if(lbIndex >= ps.length) lbIndex = ps.length - 1;
+  if(lbMode === 'pick'){
+    const it = ps[lbIndex], key = 'pick' + it.n;
+    $('lbPos').textContent = `${lbIndex+1} / ${ps.length}  ·  ${it.info.date.slice(5).replace('-','/')} ${it.info.time}`;
+    if($('lbImg').dataset.id !== key){ resetZoom(); $('lbImg').dataset.id = key; $('lbImg').src = it.url; }
+    $('lbPick').hidden = it.bad; $('lbPick').textContent = it.sel ? '✓ 選択中' : '選択する';
+    $('lbPick').style.background = it.sel ? 'var(--accent)' : ''; $('lbPick').style.color = it.sel ? 'var(--accent-ink)' : '';
+    $('lbShare').hidden = $('lbCover').hidden = $('lbDel').hidden = $('lbDelYes').hidden = true;
+    $('lbPrev').disabled = lbIndex === 0; $('lbNext').disabled = lbIndex === ps.length - 1;
+    return;
+  }
+  $('lbPick').hidden = true; $('lbShare').hidden = false;
   const p = ps[lbIndex];
   $('lbPos').textContent = `${lbIndex+1} / ${ps.length}${p.taken ? '  ·  ' + p.taken.slice(11) : ''}`;
   if($('lbImg').dataset.id !== p.id) resetZoom();
@@ -703,9 +903,11 @@ function renderLb(){
   $('lbDel').hidden = false; $('lbDelYes').hidden = true;
   $('lbPrev').disabled = lbIndex === 0; $('lbNext').disabled = lbIndex === ps.length - 1;
 }
-function lbGo(d){ const ps = (local.days[openDate] || {}).photos || []; const j = lbIndex + d; if(j >= 0 && j < ps.length){ lbIndex = j; renderLb(); } }
+function lbGo(d){ const ps = lbList(); const j = lbIndex + d; if(j >= 0 && j < ps.length){ lbIndex = j; renderLb(); } }
 $('lbClose').onclick = closeLb; $('lbPrev').onclick = () => lbGo(-1); $('lbNext').onclick = () => lbGo(1);
 $('lbCover').onclick = () => { const i = lbIndex; writeDay(openDate, c => { c.photos.unshift(c.photos.splice(i,1)[0]); return c; }); lbIndex = 0; renderLb(); toast('表紙にしました'); };
+$('lbPick').onclick = () => { const it = picks[lbIndex]; if(!it) return; setPick(it, !it.sel); renderPickCount(); renderLb(); };
+$('lbShare').onclick = () => { const p = lbList()[lbIndex]; if(p) shareIds([p.id], openDate); };
 $('lbDel').onclick = () => { $('lbDel').hidden = true; $('lbDelYes').hidden = false; };
 $('lbDelYes').onclick = () => {
   const p = (local.days[openDate].photos || [])[lbIndex]; if(!p) return;
@@ -810,16 +1012,17 @@ window.addEventListener('resize', () => { if(lbIndex >= 0) applyZoom(false); });
 document.addEventListener('keydown', e => {
   if(lbIndex >= 0){ if(e.key === 'ArrowLeft') lbGo(-1); else if(e.key === 'ArrowRight') lbGo(1); else if(e.key === 'Escape') closeLb(); return; }
   if(/INPUT|TEXTAREA/.test(document.activeElement.tagName)) return;
-  if(e.key === 'Escape'){ if(!$('settings').hidden) closeSettings(); else if(openDate) closeDay(); }
+  if(e.key === 'Escape'){ if(!$('settings').hidden) closeSettings(); else if(!$('picker').hidden) closePicker(); else if(openDate) closeDay(); }
 });
 /* Android back button closes overlays */
 function pushOverlay(){ try{ history.pushState({o:1}, ''); }catch(e){} }
-window.addEventListener('popstate', () => { if(lbIndex >= 0) closeLb(); else if(!$('settings').hidden) closeSettings(); else if(openDate) closeDay(); });
+window.addEventListener('popstate', () => { if(lbIndex >= 0) closeLb(); else if(!$('settings').hidden) closeSettings(); else if(!$('picker').hidden) closePicker(); else if(openDate) closeDay(); });
 const _openDay = openDay; openDay = k => { if(!openDate) pushOverlay(); _openDay(k); };
-const _openLb = openLb; openLb = i => { pushOverlay(); _openLb(i); };
+const _openLb = openLb; openLb = (i, m) => { pushOverlay(); _openLb(i, m); };
 const viaBack = fn => () => { if(history.state && history.state.o) history.back(); else fn(); };
 $('closeSheet').onclick = viaBack(closeDay);
 $('lbClose').onclick = viaBack(closeLb);
+$('closePicker').onclick = viaBack(closePicker);
 
 /* ---------------- Settings ---------------- */
 function openSettings(){ $('sizeSel').value = String(fullPx()); $('cidIn').value = clientId; $('cidMsg').textContent = ''; $('clearCacheYes').hidden = true; $('clearCache').hidden = false; $('settings').hidden = false; document.body.style.overflow = 'hidden'; updateConn(); cacheInfo(); pushOverlay(); }
@@ -830,7 +1033,7 @@ async function cacheInfo(){
   try{ const est = await navigator.storage.estimate(); s += `（約${Math.round((est.usage||0)/1048576)}MB）`; }catch(e){}
   $('cacheInfo').textContent = s;
 }
-$('status').onclick = openSettings; $('closeSettings').onclick = viaBack(closeSettings);
+$('status').onclick = openSettings; $('gearBtn').onclick = openSettings; $('closeSettings').onclick = viaBack(closeSettings);
 $('cidSave').onclick = () => {
   const v = $('cidIn').value.trim();
   if(v && !/\.apps\.googleusercontent\.com$/.test(v)){ $('cidMsg').textContent = '「.apps.googleusercontent.com」で終わるIDを入力してください'; return; }
