@@ -196,12 +196,13 @@ header.top h1{font-size:20px;margin:0;font-weight:700;letter-spacing:.02em;flex:
     <div class="photos" id="photos"></div>
     <div class="actions" id="dayActions">
       <label class="btn" for="file" id="addHere" hidden>＋ この日に写真を追加</label>
-      <button class="btn" id="shareMode">写真を共有</button>
+      <button class="btn" id="shareMode">選択して共有・移動</button>
     </div>
     <div class="dock" id="shareBar" hidden>
       <span class="grow" id="shareCount"></span>
       <button class="btn" id="shareAll">すべて選択</button>
       <button class="btn" id="shareCancel">キャンセル</button>
+      <button class="btn" id="moveGo">日付を移動</button>
       <button class="btn primary" id="shareGo">共有</button>
     </div>
   </div>
@@ -268,6 +269,7 @@ header.top h1{font-size:20px;margin:0;font-weight:700;letter-spacing:.02em;flex:
   <div class="bar">
     <div class="pos" id="lbPos"></div>
     <button id="lbPick" hidden></button>
+    <button id="lbDate" hidden>日付</button>
     <button id="lbShare" hidden>共有</button>
     <button id="lbCover" hidden>表紙にする</button>
     <button id="lbDel" hidden>削除</button>
@@ -284,6 +286,7 @@ header.top h1{font-size:20px;margin:0;font-weight:700;letter-spacing:.02em;flex:
 
 <div class="toast" id="toast" hidden></div>
 <input type="file" id="file" class="vh" accept="image/*" multiple>
+<input type="date" id="dateIn" class="vh" tabindex="-1" aria-hidden="true">
 
 <script>
 "use strict";
@@ -338,20 +341,30 @@ const idbClear = s => idbOp(s,'readwrite', st => st.clear());
 const idbCount = s => idbOp(s,'readonly', st => st.count());
 
 /* ---------------- Data model & merge ----------------
-   index = { version:1, days:{ "YYYY-MM-DD": {title, memo, photos:[{id,thumb,taken,w,h}], removed:[ids], updatedAt} },
+   index = { version:1, days:{ "YYYY-MM-DD": {title, memo, photos:[{id,thumb,taken,w,h,addedAt}], removed:{id: ts}, updatedAt} },
              deleted:{ "YYYY-MM-DD": ts } }                                  */
 const emptyIndex = () => ({version:1, days:{}, deleted:{}});
 let local = emptyIndex();
 let dirty = false, editSeq = 0;
 
+/* removed: legacy array of ids (= removed at ts 1) or {id: ts}. A photo is shown unless it was
+   removed after it was (re)added — so moving a photo away and back again works across devices. */
+function rmMap(r){ if(!r) return {}; if(Array.isArray(r)){ const o = {}; r.forEach(id => o[id] = 1); return o; } return {...r}; }
 function mergeDay(x, y){
   if(!x) return clone(y); if(!y) return clone(x);
   const [n, o] = (x.updatedAt||0) >= (y.updatedAt||0) ? [x, y] : [y, x];
-  const removed = [...new Set([...(n.removed||[]), ...(o.removed||[])])];
+  const rm = rmMap(n.removed), ro = rmMap(o.removed);
+  for(const k in ro) rm[k] = Math.max(rm[k] || 0, ro[k]);
+  const oById = new Map((o.photos||[]).map(p => [p.id, p]));
   const have = new Set((n.photos||[]).map(p => p.id));
   const extra = (o.photos||[]).filter(p => !have.has(p.id)).sort((a,b) => (a.taken||'').localeCompare(b.taken||''));
-  const photos = [...(n.photos||[]), ...extra].filter(p => !removed.includes(p.id));
-  return {...clone(n), photos: clone(photos), removed};
+  const photos = [...(n.photos||[]), ...extra].map(p => {
+    const q = oById.get(p.id);
+    return q && (q.addedAt||0) > (p.addedAt||0) ? {...p, addedAt: q.addedAt} : p;
+  }).filter(p => !(p.id in rm) || (p.addedAt||0) > rm[p.id]);
+  const out = {...clone(n), photos: clone(photos)};
+  if(Object.keys(rm).length) out.removed = rm; else delete out.removed;
+  return out;
 }
 function merge(a, b){
   const out = emptyIndex();
@@ -372,7 +385,7 @@ function normalize(ix){
   return JSON.stringify(o);
 }
 const isEmptyDay = d => !d.title && !(d.memo||'').trim() && !(d.photos||[]).length;
-function blank(k){ return {date:k, title:'', memo:'', photos:[], removed:[]}; }
+function blank(k){ return {date:k, title:'', memo:'', photos:[], removed:{}}; }
 
 async function saveLocal(){ try{ await idbPut('kv','index',local); await idbPut('kv','dirty',dirty); }catch(e){} }
 
@@ -519,6 +532,34 @@ function imgUrl(id){
 }
 async function getBlob(id){ if(!blobCache.has(id)) await imgUrl(id); return blobCache.get(id) || null; }
 
+/* ---------------- Date picker & moving photos ---------------- */
+function askDate(cur, cb){
+  const el = $('dateIn'); el.value = cur || todayKey();
+  el.onchange = () => { if(el.value) cb(el.value); };
+  try{ el.showPicker(); }catch(e){ el.focus(); el.click(); }
+}
+const sortByTaken = (a, b) => (a.taken||'').localeCompare(b.taken||'');
+function movePhotos(from, ids, to){
+  if(!ids.length || from === to) return 0;
+  const now = Date.now(); let moving = [];
+  writeDay(from, c => {
+    moving = c.photos.filter(p => ids.includes(p.id));
+    const rm = rmMap(c.removed); ids.forEach(id => rm[id] = now);
+    return {...c, photos: c.photos.filter(p => !ids.includes(p.id)), removed: rm};
+  });
+  if(!moving.length) return 0;
+  writeDay(to, c => {
+    const rm = rmMap(c.removed); ids.forEach(id => delete rm[id]);
+    const add = moving.map(p => ({...p, addedAt: now + 1}));
+    const rest = c.photos.filter(p => !ids.includes(p.id));
+    const photos = rest.length ? [rest[0], ...[...rest.slice(1), ...add].sort(sortByTaken)] : add.sort(sortByTaken);
+    return {...c, photos, removed: rm};
+  });
+  const {m, d} = parseKey(to);
+  toast(`${moving.length}枚を${m}月${d}日に移動しました`);
+  return moving.length;
+}
+
 /* ---------------- Share (LINE etc. via the OS share sheet) ---------------- */
 async function shareIds(ids, date){
   if(!ids.length) return;
@@ -652,7 +693,7 @@ function renderDay(){
   $('photos').innerHTML = ps.map((p,i) => `<button data-i="${i}" data-img="${p.thumb||p.id}" class="${shareSel && shareSel.has(p.id) ? 'on' : ''}" aria-label="写真 ${i+1}">${i===0?'<span class="cv">表紙</span>':''}${shareSel ? '<span class="chk"></span>' : ''}</button>`).join('');
   $('shareMode').hidden = !ps.length || !!shareSel;
   $('shareBar').hidden = !shareSel;
-  if(shareSel){ $('shareCount').textContent = `${shareSel.size}枚を選択`; $('shareGo').disabled = !shareSel.size; $('shareAll').textContent = shareSel.size === ps.length ? 'すべて解除' : 'すべて選択'; }
+  if(shareSel){ $('shareCount').textContent = `${shareSel.size}枚を選択`; $('shareGo').disabled = $('moveGo').disabled = !shareSel.size; $('shareAll').textContent = shareSel.size === ps.length ? 'すべて解除' : 'すべて選択'; }
   hydrate($('photos'));
   const ks = contentKeys();
   const prev = ks.filter(x => x < openDate).pop(), next = ks.find(x => x > openDate);
@@ -676,10 +717,14 @@ $('shareMode').onclick = () => {
   const ps = (local.days[openDate] || {}).photos || [];
   shareSel = new Set(); renderDay();
   ps.forEach(p => getBlob(p.id));            // preload so the share sheet opens on the first tap
-  toast('共有する写真をタップして選んでください');
+  toast('写真をタップして選んでください');
 };
 $('shareAll').onclick = () => { const ps = local.days[openDate].photos; shareSel = shareSel.size === ps.length ? new Set() : new Set(ps.map(p => p.id)); renderDay(); };
 $('shareCancel').onclick = exitShare;
+$('moveGo').onclick = () => {
+  const from = openDate, ids = local.days[from].photos.filter(p => shareSel.has(p.id)).map(p => p.id);
+  askDate(from, to => { if(movePhotos(from, ids, to)) exitShare(); });
+};
 $('shareGo').onclick = async () => {
   const ids = local.days[openDate].photos.filter(p => shareSel.has(p.id)).map(p => p.id);
   if(await shareIds(ids, openDate)) exitShare();
@@ -706,14 +751,13 @@ let picks = [], pickFixed = null, pickRun = 0;
 function openPicker(files, fixed){
   closePicker();
   pickFixed = fixed; const run = ++pickRun;
-  picks = files.map((file, n) => ({n, file, url: URL.createObjectURL(file), thumb: null, info: null, sel: true, bad: false}));
+  picks = files.map((file, n) => ({n, file, url: URL.createObjectURL(file), thumb: null, info: null, d: fixed || null, sel: true, bad: false}));
   $('picker').hidden = false; document.body.style.overflow = 'hidden'; $('picker').scrollTop = 0;
   pushOverlay();
   $('pickGroups').innerHTML = `<div class="hint">${files.length}枚を読み込み中…</div>`; renderPickCount();
   (async () => {
     for(const it of picks){ it.info = (await exifInfo(it.file)) || nameInfo(it.file.name) || mtimeInfo(it.file); if(run !== pickRun) return; }
-    picks.sort((a, b) => ((pickFixed || a.info.date) + a.info.time).localeCompare((pickFixed || b.info.date) + b.info.time));
-    renderPicker();
+    resortPicks();
     let next = 0;
     const worker = async () => {
       while(next < picks.length && run === pickRun){
@@ -744,17 +788,19 @@ function closePicker(){
   picks = []; $('picker').hidden = true; $('pickGroups').innerHTML = '';
   if(!openDate && $('settings').hidden) document.body.style.overflow = '';
 }
+const pickDate = it => it.d || it.info.date;
+function resortPicks(){ picks.sort((a, b) => (pickDate(a) + a.info.date + a.info.time).localeCompare(pickDate(b) + b.info.date + b.info.time)); renderPicker(); }
 function renderPicker(){
   const groups = {};
-  picks.forEach((it, i) => { (groups[pickFixed || it.info.date] ||= []).push(i); });
+  picks.forEach((it, i) => { (groups[pickDate(it)] ||= []).push(i); });
   $('pickGroups').innerHTML = Object.keys(groups).sort().map(d => `
     <div class="pick-group">
-      <div class="pick-head"><div class="d">${fmtDate(d)}<small data-gc="${d}"></small></div><button class="btn" data-gall="${d}">この日を切り替え</button></div>
+      <div class="pick-head"><div class="d">${fmtDate(d)}<small data-gc="${d}"></small></div><button class="btn" data-gdate="${d}">日付を変更</button><button class="btn" data-gall="${d}">全切替</button></div>
       <div class="tiles">${groups[d].map(i => { const it = picks[i];
         return `<button class="tile ${it.sel ? 'on' : 'off'} ${it.bad ? 'bad' : ''}" data-n="${it.n}" data-i="${i}" ${it.thumb ? `style="background-image:url('${it.thumb}')"` : ''} aria-label="${it.info.time}"><span class="chk"></span></button>`; }).join('')}</div>
     </div>`).join('');
-  if(pickFixed) $('pickInfo').textContent = 'すべて ' + fmtDate(pickFixed) + ' に追加します。写真をタップすると拡大、右上の丸で選択を切り替えます。';
-  else $('pickInfo').textContent = '撮影日ごとに分けて追加します。写真をタップすると拡大、右上の丸で選択を切り替えます。';
+  $('pickInfo').textContent = (pickFixed ? fmtDate(pickFixed) + ' に追加します。' : '撮影日ごとに分けて追加します。')
+    + '写真をタップすると拡大、右上の丸で選択を切り替えます。日付が違うときは「日付を変更」で直せます。';
   renderPickCount();
 }
 function renderPickCount(){
@@ -763,7 +809,7 @@ function renderPickCount(){
   $('pickAdd').disabled = !sel;
   $('pickAll').textContent = sel === picks.filter(it => !it.bad).length && sel ? 'すべて解除' : 'すべて選択';
   document.querySelectorAll('#pickGroups [data-gc]').forEach(el => {
-    const d = el.dataset.gc, items = picks.filter(it => it.info && (pickFixed || it.info.date) === d);
+    const d = el.dataset.gc, items = picks.filter(it => it.info && pickDate(it) === d);
     el.textContent = `${items.filter(it => it.sel).length}/${items.length}`;
   });
 }
@@ -773,8 +819,10 @@ function setPick(it, v){
   if(el){ el.classList.toggle('on', v); el.classList.toggle('off', !v); }
 }
 $('pickGroups').addEventListener('click', e => {
+  const gd = e.target.closest('[data-gdate]');
+  if(gd){ const from = gd.dataset.gdate; askDate(from, to => { picks.forEach(it => { if(pickDate(it) === from) it.d = to; }); resortPicks(); }); return; }
   const g = e.target.closest('[data-gall]');
-  if(g){ const items = picks.filter(it => (pickFixed || it.info.date) === g.dataset.gall && !it.bad); const v = !items.every(it => it.sel); items.forEach(it => setPick(it, v)); renderPickCount(); return; }
+  if(g){ const items = picks.filter(it => pickDate(it) === g.dataset.gall && !it.bad); const v = !items.every(it => it.sel); items.forEach(it => setPick(it, v)); renderPickCount(); return; }
   const t = e.target.closest('.tile'); if(!t) return;
   const it = picks[+t.dataset.i];
   if(e.target.closest('.chk')){ setPick(it, !it.sel); renderPickCount(); return; }
@@ -782,10 +830,10 @@ $('pickGroups').addEventListener('click', e => {
 });
 $('pickAll').onclick = () => { const ok = picks.filter(it => !it.bad); const v = !ok.every(it => it.sel); ok.forEach(it => setPick(it, v)); renderPickCount(); };
 $('pickAdd').onclick = () => {
-  const files = picks.filter(it => it.sel).map(it => it.file), fixed = pickFixed;
-  if(!files.length) return;
+  const items = picks.filter(it => it.sel).map(it => ({file: it.file, date: pickDate(it), info: it.info}));
+  if(!items.length) return;
   viaBack(closePicker)();
-  setTimeout(() => importFiles(files, fixed), 50);
+  setTimeout(() => importFiles(items), 50);
 };
 
 async function exifInfo(file){
@@ -828,47 +876,96 @@ async function shrink(bmp, max, q){
   if(!blob) throw new Error('encode');
   return {blob, w, h};
 }
+/* Size after EXIF rotation, read from the header only (no full decode). */
+function orientedSize(file){
+  return new Promise(res => {
+    const u = URL.createObjectURL(file), img = new Image();
+    const done = v => { URL.revokeObjectURL(u); res(v); };
+    const to = setTimeout(() => done(null), 3000);
+    img.onload = () => { clearTimeout(to); done(img.naturalWidth ? {w: img.naturalWidth, h: img.naturalHeight} : null); };
+    img.onerror = () => { clearTimeout(to); done(null); };
+    img.src = u;
+  });
+}
+/* Decode directly at the target size: far less work and memory than decoding a 12–50MP photo in full. */
+async function decodeScaled(file, max){
+  const dim = await orientedSize(file);
+  const opts = {imageOrientation:'from-image', resizeQuality:'high'};
+  if(dim && Math.max(dim.w, dim.h) > max){ if(dim.w >= dim.h) opts.resizeWidth = max; else opts.resizeHeight = max; }
+  try{ return await createImageBitmap(file, opts); }
+  catch(e){ try{ return await createImageBitmap(file, {imageOrientation:'from-image'}); }catch(e2){ return await createImageBitmap(file); } }
+}
 async function withRetry(fn){ try{ return await fn(); }catch(e){ if(e.code === 'auth') throw e; await new Promise(r => setTimeout(r, 1500)); return fn(); } }
 
-async function importFiles(files, fixed){
+async function importFiles(items){
   if(importing) return;
   if(!hasToken()){ toast('写真の追加にはGoogleへのログインが必要です'); return; }
   if(!navigator.onLine){ toast('オフラインのため写真を追加できません'); return; }
   importing = true; $('addBtn').classList.add('busy'); $('addHere').classList.add('busy'); $('upload').hidden = false;
-  const byDate = {}; let done = 0, failed = 0, authLost = false;
-  const step = () => { $('upText').textContent = `アップロード中 ${done}/${files.length}（画面を閉じないでください）`; $('upBar').style.width = (done/files.length*100) + '%'; };
+  let wake = null; try{ wake = await navigator.wakeLock.request('screen'); }catch(e){}
+  const byDate = {}, total = items.length; let done = 0, ok = 0, authLost = false;
+  const t0 = Date.now();
+  const step = () => {
+    let eta = '';
+    if(done >= 2 && done < total){ const sec = Math.round((Date.now() - t0) / done * (total - done) / 1000); eta = sec >= 60 ? `・残り約${Math.ceil(sec/60)}分` : `・残り約${sec}秒`; }
+    $('upText').textContent = `アップロード中 ${done}/${total}${eta}（画面を開いたままにしてください）`;
+    $('upBar').style.width = (done/total*100) + '%';
+  };
   step();
-  try{ await ensureFolders(); }catch(e){ failed = files.length; done = files.length; }
-  for(const f of (folders ? files : [])){
+  try{ await ensureFolders(); }catch(e){ items = []; }
+  // up to 2 images decoded at once (decoded straight to the target size), up to 3 uploads in flight
+  let next = 0, slots = 2, procMs = 0, upMs = 0; const slotWait = [];
+  const encode = async it => {
+    if(slots <= 0) await new Promise(r => slotWait.push(r));
+    slots--; const t = performance.now();
     try{
-      const info = (await exifInfo(f)) || nameInfo(f.name) || mtimeInfo(f);
-      const date = fixed || info.date;
-      let bmp; try{ bmp = await createImageBitmap(f, {imageOrientation:'from-image'}); }catch(e){ bmp = await createImageBitmap(f); }
-      const full = await shrink(bmp, fullPx(), .86), th = await shrink(bmp, THUMB_PX, .8);
-      if(bmp.close) bmp.close();
-      const base = `${date}_${info.time.replace(':','')}_${Math.random().toString(36).slice(2,7)}.jpg`;
-      const id = await withRetry(() => uploadBlob(full.blob, base, folders.photos));
-      const thumb = await withRetry(() => uploadBlob(th.blob, base, folders.thumbs));
-      try{ await idbPut('blobs', id, full.blob); await idbPut('blobs', thumb, th.blob); }catch(e){}
-      (byDate[date] ||= []).push({id, thumb, taken:`${info.date} ${info.time}`, w:full.w, h:full.h});
-    }catch(e){ failed++; if(e && e.code === 'auth'){ authLost = true; failed += files.length - done - 1; done = files.length; break; } }
-    done++; step();
-  }
+      const info = it.info || (await exifInfo(it.file)) || nameInfo(it.file.name) || mtimeInfo(it.file);
+      const bmp = await decodeScaled(it.file, fullPx());
+      try{
+        const full = await shrink(bmp, fullPx(), .86);
+        const th = await shrink(bmp, THUMB_PX, .8);
+        return {info, full, th};
+      } finally { if(bmp.close) bmp.close(); }
+    } finally { procMs += performance.now() - t; slots++; const w = slotWait.shift(); if(w) w(); }
+  };
+  const worker = async () => {
+    while(next < items.length && !authLost){
+      const it = items[next++];
+      try{
+        const {info, full, th} = await encode(it);
+        const date = it.date || info.date;
+        const base = `${date}_${info.time.replace(':','')}_${Math.random().toString(36).slice(2,7)}.jpg`;
+        const tu = performance.now();
+        const [id, thumb] = await Promise.all([
+          withRetry(() => uploadBlob(full.blob, base, folders.photos)),
+          withRetry(() => uploadBlob(th.blob, base, folders.thumbs)),
+        ]);
+        upMs += performance.now() - tu;
+        try{ await idbPut('blobs', id, full.blob); await idbPut('blobs', thumb, th.blob); }catch(e){}
+        (byDate[date] ||= []).push({id, thumb, taken:`${info.date} ${info.time}`, w:full.w, h:full.h, addedAt: Date.now()});
+        ok++;
+      }catch(e){ if(e && e.code === 'auth') authLost = true; }
+      done++; step();
+    }
+  };
+  await Promise.all([worker(), worker(), worker()]);
+  try{ if(wake) await wake.release(); }catch(e){}
   const dates = Object.keys(byDate).sort();
   for(const k of dates){
     writeDay(k, cur => {
-      const add = byDate[k].sort((a,b) => a.taken.localeCompare(b.taken));
+      const add = byDate[k].sort(sortByTaken);
       if(!cur.photos.length) return {...cur, photos: add};
-      return {...cur, photos: [cur.photos[0], ...[...cur.photos.slice(1), ...add].sort((a,b) => (a.taken||'').localeCompare(b.taken||''))]};
+      return {...cur, photos: [cur.photos[0], ...[...cur.photos.slice(1), ...add].sort(sortByTaken)]};
     });
   }
   if(dates.length) await syncNow();
   importing = false; $('addBtn').classList.remove('busy'); $('addHere').classList.remove('busy'); $('upload').hidden = true;
-  const n = files.length - failed;
-  let msg = n ? `${n}枚を${dates.length}日分に追加しました` : '写真を追加できませんでした';
+  const failed = total - ok, sec = Math.round((Date.now() - t0) / 1000);
+  const per = ms => (ms / Math.max(1, total) / 1000).toFixed(1);
+  let msg = ok ? `${ok}枚を${dates.length}日分に追加しました（${sec}秒／1枚あたり 処理${per(procMs)}秒・送信${per(upMs)}秒）` : '写真を追加できませんでした';
   if(failed) msg += authLost ? `。ログインの期限が切れたため${failed}枚が未追加です。ログインし直してから追加してください`
                              : `。${failed}枚は読み込めませんでした（HEICなど未対応の形式か通信エラー）`;
-  toast(msg, failed ? 7000 : 3000);
+  toast(msg, failed ? 7000 : 4000);
   if(!openDate && dates.length){ const {y,m} = parseKey(dates[dates.length-1]); viewY = y; viewM = m; renderCal(); }
 }
 
@@ -883,7 +980,8 @@ function renderLb(){
   if(lbIndex >= ps.length) lbIndex = ps.length - 1;
   if(lbMode === 'pick'){
     const it = ps[lbIndex], key = 'pick' + it.n;
-    $('lbPos').textContent = `${lbIndex+1} / ${ps.length}  ·  ${it.info.date.slice(5).replace('-','/')} ${it.info.time}`;
+    $('lbPos').textContent = `${lbIndex+1} / ${ps.length}  ·  ${pickDate(it).slice(5).replace('-','/')} ${it.info.time}${it.d ? '（変更）' : ''}`;
+    $('lbDate').hidden = false;
     if($('lbImg').dataset.id !== key){ resetZoom(); $('lbImg').dataset.id = key; $('lbImg').src = it.url; }
     $('lbPick').hidden = it.bad; $('lbPick').textContent = it.sel ? '✓ 選択中' : '選択する';
     $('lbPick').style.background = it.sel ? 'var(--accent)' : ''; $('lbPick').style.color = it.sel ? 'var(--accent-ink)' : '';
@@ -891,7 +989,7 @@ function renderLb(){
     $('lbPrev').disabled = lbIndex === 0; $('lbNext').disabled = lbIndex === ps.length - 1;
     return;
   }
-  $('lbPick').hidden = true; $('lbShare').hidden = false;
+  $('lbPick').hidden = true; $('lbShare').hidden = false; $('lbDate').hidden = false;
   const p = ps[lbIndex];
   $('lbPos').textContent = `${lbIndex+1} / ${ps.length}${p.taken ? '  ·  ' + p.taken.slice(11) : ''}`;
   if($('lbImg').dataset.id !== p.id) resetZoom();
@@ -907,11 +1005,20 @@ function lbGo(d){ const ps = lbList(); const j = lbIndex + d; if(j >= 0 && j < p
 $('lbClose').onclick = closeLb; $('lbPrev').onclick = () => lbGo(-1); $('lbNext').onclick = () => lbGo(1);
 $('lbCover').onclick = () => { const i = lbIndex; writeDay(openDate, c => { c.photos.unshift(c.photos.splice(i,1)[0]); return c; }); lbIndex = 0; renderLb(); toast('表紙にしました'); };
 $('lbPick').onclick = () => { const it = picks[lbIndex]; if(!it) return; setPick(it, !it.sel); renderPickCount(); renderLb(); };
+$('lbDate').onclick = () => {
+  if(lbMode === 'pick'){
+    const it = picks[lbIndex]; if(!it) return;
+    askDate(pickDate(it), d => { it.d = d; resortPicks(); lbIndex = picks.indexOf(it); renderLb(); toast('日付を変更しました'); });
+  } else {
+    const p = lbList()[lbIndex]; if(!p) return;
+    askDate(openDate, d => movePhotos(openDate, [p.id], d));
+  }
+};
 $('lbShare').onclick = () => { const p = lbList()[lbIndex]; if(p) shareIds([p.id], openDate); };
 $('lbDel').onclick = () => { $('lbDel').hidden = true; $('lbDelYes').hidden = false; };
 $('lbDelYes').onclick = () => {
   const p = (local.days[openDate].photos || [])[lbIndex]; if(!p) return;
-  writeDay(openDate, c => ({...c, photos: c.photos.filter(x => x.id !== p.id), removed: [...(c.removed||[]), p.id]}));
+  writeDay(openDate, c => ({...c, photos: c.photos.filter(x => x.id !== p.id), removed: {...rmMap(c.removed), [p.id]: Date.now()}}));
   for(const id of [p.id, p.thumb]) if(id){ idbDel('blobs', id).catch(()=>{}); if(hasToken()) trashFile(id); }
   toast(hasToken() ? '削除しました（ドライブのゴミ箱に移動）' : '削除しました');
 };
