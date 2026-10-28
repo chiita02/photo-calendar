@@ -154,6 +154,10 @@ header.top h1{font-size:20px;margin:0;font-weight:700;letter-spacing:.02em;flex:
     <div class="small" id="upText"></div>
     <div class="progress"><i id="upBar"></i></div>
   </div>
+  <div class="hint" id="upFail" hidden style="border-style:solid;border-color:var(--warn);color:var(--ink)">
+    <div id="upFailText"></div>
+    <div class="actions" style="margin-top:8px"><button class="btn primary" id="upRetry">もう一度アップロード</button><button class="btn" id="upFailClose">閉じる</button></div>
+  </div>
   <div class="tabs" role="tablist">
     <button role="tab" id="tabCal" aria-selected="true">カレンダー</button>
     <button role="tab" id="tabList" aria-selected="false">イベント一覧</button>
@@ -409,18 +413,20 @@ function initGis(){
   tokenClient = google.accounts.oauth2.initTokenClient({
     client_id: clientId, scope: SCOPE,
     callback: r => {
-      if(r.error){ toast('ログインできませんでした: ' + r.error, 5000); return; }
+      if(r.error){ toast('ログインできませんでした: ' + r.error, 5000); loginAborted(); return; }
       token = {v: r.access_token, exp: Date.now() + (Number(r.expires_in||3600) - 60)*1000};
       ls.set('photocal.token', JSON.stringify(token));
       folders = null; updateConn(); syncNow();
+      if(pendingLogin){ const items = pendingLogin; pendingLogin = null; enqueueImport(items); }
     },
-    error_callback: e => { if(e && e.type !== 'popup_closed') toast('ログイン画面を開けませんでした（' + (e.type||'error') + '）', 5000); },
+    error_callback: e => { if(e && e.type !== 'popup_closed') toast('ログイン画面を開けませんでした（' + (e.type||'error') + '）', 5000); loginAborted(); },
   });
 }
 window.onGisLoad = initGis;
+function loginAborted(){ if(pendingLogin){ keepFailed(pendingLogin, 'auth'); pendingLogin = null; showFail(); } }
 function login(){
-  if(!clientId){ openSettings(); toast('先にGoogleのクライアントIDを設定してください', 4000); return; }
-  if(!tokenClient){ initGis(); if(!tokenClient){ toast('Googleの読み込み中です。少し待ってからもう一度押してください'); return; } }
+  if(!clientId){ openSettings(); toast('先にGoogleのクライアントIDを設定してください', 4000); loginAborted(); return; }
+  if(!tokenClient){ initGis(); if(!tokenClient){ toast('Googleの読み込み中です。少し待ってからもう一度押してください'); loginAborted(); return; } }
   tokenClient.requestAccessToken({prompt: ''});
 }
 function logout(){
@@ -432,7 +438,12 @@ function logout(){
 let folders = null; // {root, photos, thumbs, indexId}
 async function api(url, opts={}){
   if(!hasToken()){ updateConn(); throw {code:'auth'}; }
-  const r = await fetch(url, {...opts, headers:{...(opts.headers||{}), Authorization:'Bearer ' + token.v}});
+  const ctl = new AbortController(), ms = opts.body instanceof Blob ? 120000 : 30000;
+  const timer = setTimeout(() => ctl.abort(), ms);
+  let r;
+  try{ r = await fetch(url, {...opts, signal: ctl.signal, headers:{...(opts.headers||{}), Authorization:'Bearer ' + token.v}}); }
+  catch(e){ throw {code:'net', text: e.name === 'AbortError' ? 'timeout' : String(e)}; }
+  finally{ clearTimeout(timer); }
   if(r.status === 401){ token = null; ls.del('photocal.token'); updateConn(); throw {code:'auth'}; }
   if(!r.ok){ let t=''; try{ t = await r.text(); }catch(e){} throw {code:'http', status:r.status, text:t}; }
   return r;
@@ -465,10 +476,21 @@ async function uploadBlob(blob, name, parent){
   const r = await api(`${UPLOAD}/files?uploadType=multipart&fields=id`, {method:'POST', headers:{'Content-Type':m.type}, body:m.body});
   return (await r.json()).id;
 }
+/* Every index.json this app can see (drive.file scope = only files this app created). Two devices that
+   start before either has saved can each create one; we merge them all, keep one and trash the rest. */
 async function readRemoteIndex(){
-  if(!folders.indexId) return null;
-  try{ const r = await api(`${DRIVE}/files/${folders.indexId}?alt=media`); return await r.json(); }
-  catch(e){ if(e.code === 'http' && e.status === 404){ folders.indexId = null; return null; } throw e; }
+  const q = "name='index.json' and trashed=false and mimeType!='application/vnd.google-apps.folder'";
+  const r = await api(`${DRIVE}/files?q=${encodeURIComponent(q)}&fields=files(id,parents,createdTime)&orderBy=createdTime&spaces=drive`);
+  const files = (await r.json()).files || [];
+  if(!files.length){ folders.indexId = null; return {index: null, extras: []}; }
+  const keep = files.find(f => (f.parents||[]).includes(folders.root)) || files[0];
+  let index = null;
+  for(const f of files){
+    try{ const j = await (await api(`${DRIVE}/files/${f.id}?alt=media`)).json(); if(j && j.days) index = index ? merge(index, j) : j; }
+    catch(e){ if(!(e.code === 'http' && e.status === 404)) throw e; }
+  }
+  folders.indexId = keep.id;
+  return {index, extras: files.filter(f => f.id !== keep.id).map(f => f.id)};
 }
 async function writeRemoteIndex(ix){
   const blob = new Blob([JSON.stringify(ix)], {type:'application/json'});
@@ -478,7 +500,17 @@ async function writeRemoteIndex(ix){
     folders.indexId = await uploadBlob(blob, 'index.json', folders.root);
   }
 }
-async function trashFile(id){ try{ await api(`${DRIVE}/files/${id}`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({trashed:true})}); }catch(e){} }
+async function trashFile(id){
+  try{ await api(`${DRIVE}/files/${id}`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({trashed:true})}); return true; }
+  catch(e){ return e && e.code === 'http' && e.status === 404; }   // already gone counts as done
+}
+function queueTrash(ids){ let q = []; try{ q = JSON.parse(ls.get('photocal.trash') || '[]'); }catch(e){} ls.set('photocal.trash', JSON.stringify([...new Set([...q, ...ids])])); }
+async function flushTrash(){
+  let q = []; try{ q = JSON.parse(ls.get('photocal.trash') || '[]'); }catch(e){}
+  if(!q.length) return;
+  const left = []; for(const id of q) if(!(await trashFile(id))) left.push(id);
+  ls.set('photocal.trash', JSON.stringify(left));
+}
 
 /* ---------------- Sync ---------------- */
 let syncing = null, syncTimer = null, lastSync = Number(ls.get('photocal.lastSync')||0), syncError = '';
@@ -494,17 +526,21 @@ async function doSync(){
   const seq = editSeq;
   try{
     await ensureFolders();
-    const remote = (await readRemoteIndex()) || emptyIndex();
+    const {index, extras} = await readRemoteIndex();
+    const remote = index || emptyIndex();
     const merged = merge(local, remote);
-    if(normalize(merged) !== normalize(remote)) await writeRemoteIndex(merged);
+    if(extras.length || normalize(merged) !== normalize(remote)) await writeRemoteIndex(merged);
+    for(const id of extras) await trashFile(id);
+    await flushTrash();
     local = merge(local, merged);           // keep edits made while we were awaiting
     if(editSeq === seq) dirty = false; else scheduleSync(500);
     lastSync = Date.now(); ls.set('photocal.lastSync', String(lastSync)); syncError = '';
     await saveLocal(); renderAll();
   }catch(e){
-    if(e.code !== 'auth') syncError = e.status ? `エラー ${e.status}` : '通信エラー';
+    if(e.code !== 'auth'){ syncError = e.status ? `エラー ${e.status}` : '通信エラー'; if(dirty) scheduleSync(30000); }
   }
 }
+setInterval(() => { if(document.visibilityState === 'visible' && hasToken() && !importing) syncNow(); }, 5*60*1000);
 
 /* ---------------- Image cache / loader ---------------- */
 const urlCache = new Map(), pending = new Map(), blobCache = new Map();
@@ -638,7 +674,7 @@ function renderCal(){
 $('cal').addEventListener('click', e => { const b = e.target.closest('button.cell'); if(b) openDay(b.dataset.k); });
 $('prevM').onclick = () => { if(--viewM < 1){ viewM = 12; viewY--; } renderCal(); };
 $('nextM').onclick = () => { if(++viewM > 12){ viewM = 1; viewY++; } renderCal(); };
-$('todayBtn').onclick = () => { viewY = now.getFullYear(); viewM = now.getMonth()+1; renderCal(); };
+$('todayBtn').onclick = () => { const t = new Date(); viewY = t.getFullYear(); viewM = t.getMonth()+1; renderCal(); };
 
 /* swipe months on the calendar */
 let cx = null, cy = null;
@@ -833,7 +869,7 @@ $('pickAdd').onclick = () => {
   const items = picks.filter(it => it.sel).map(it => ({file: it.file, date: pickDate(it), info: it.info}));
   if(!items.length) return;
   viaBack(closePicker)();
-  setTimeout(() => importFiles(items), 50);
+  setTimeout(() => enqueueImport(items), 50);
 };
 
 async function exifInfo(file){
@@ -895,42 +931,79 @@ async function decodeScaled(file, max){
   try{ return await createImageBitmap(file, opts); }
   catch(e){ try{ return await createImageBitmap(file, {imageOrientation:'from-image'}); }catch(e2){ return await createImageBitmap(file); } }
 }
-async function withRetry(fn){ try{ return await fn(); }catch(e){ if(e.code === 'auth') throw e; await new Promise(r => setTimeout(r, 1500)); return fn(); } }
+/* Up to 3 attempts with backoff; auth errors are never retried. */
+async function withRetry(fn, tries=3){
+  for(let i=0;;i++){
+    try{ return await fn(); }
+    catch(e){ if(e && e.code === 'auth' || i >= tries-1) throw e; await new Promise(r => setTimeout(r, 1000 * 3**i)); }
+  }
+}
 
-async function importFiles(items){
+/* ---- import queue: nothing the user selected is ever dropped silently ---- */
+let importQueue = [], failedItems = [], failReasons = {}, pendingLogin = null;
+function enqueueImport(items){
+  if(!items.length) return;
+  if(!navigator.onLine){ keepFailed(items, 'offline'); showFail(); return; }
+  if(!hasToken() || token.exp - Date.now() < 10*60*1000){
+    // token missing or about to expire: log in first (this runs from the 追加 tap, so the popup is allowed)
+    pendingLogin = (pendingLogin || []).concat(items);
+    toast('ログインの有効期限が近いため、ログインしてからアップロードします', 5000);
+    login(); return;
+  }
+  importQueue.push(...items);
+  if(importing){ toast(`前のアップロードが終わったら、続けて${items.length}枚を追加します`); return; }
+  runImports();
+}
+function keepFailed(items, why){ failedItems.push(...items); failReasons[why] = (failReasons[why] || 0) + items.length; }
+function showFail(){
+  const n = failedItems.length;
+  if(!n){ $('upFail').hidden = true; return; }
+  const label = {read:'写真を読み込めなかった', net:'通信エラー', auth:'ログインの期限切れ', offline:'オフライン', drive:'ドライブのエラー'};
+  const why = Object.entries(failReasons).map(([k,v]) => `${label[k] || k} ${v}枚`).join('、');
+  $('upFailText').innerHTML = `<b>${n}枚を追加できませんでした</b>（${esc(why)}）。選んだ写真はこの画面を閉じるまで覚えているので、もう一度アップロードできます。`;
+  $('upFail').hidden = false;
+}
+$('upRetry').onclick = () => { const items = failedItems; failedItems = []; failReasons = {}; $('upFail').hidden = true; enqueueImport(items); };
+$('upFailClose').onclick = () => { failedItems = []; failReasons = {}; $('upFail').hidden = true; };
+
+async function runImports(){
   if(importing) return;
-  if(!hasToken()){ toast('写真の追加にはGoogleへのログインが必要です'); return; }
-  if(!navigator.onLine){ toast('オフラインのため写真を追加できません'); return; }
-  importing = true; $('addBtn').classList.add('busy'); $('addHere').classList.add('busy'); $('upload').hidden = false;
+  importing = true; $('upload').hidden = false;
   let wake = null; try{ wake = await navigator.wakeLock.request('screen'); }catch(e){}
-  const byDate = {}, total = items.length; let done = 0, ok = 0, authLost = false;
-  const t0 = Date.now();
+  let ok = 0, done = 0, total = 0, procMs = 0, upMs = 0; const days = new Set(), t0 = Date.now();
   const step = () => {
+    total = done + importQueue.length + inFlight;
     let eta = '';
     if(done >= 2 && done < total){ const sec = Math.round((Date.now() - t0) / done * (total - done) / 1000); eta = sec >= 60 ? `・残り約${Math.ceil(sec/60)}分` : `・残り約${sec}秒`; }
     $('upText').textContent = `アップロード中 ${done}/${total}${eta}（画面を開いたままにしてください）`;
-    $('upBar').style.width = (done/total*100) + '%';
+    $('upBar').style.width = (total ? done/total*100 : 0) + '%';
   };
+  let inFlight = 0, authLost = false;
   step();
-  try{ await ensureFolders(); }catch(e){ items = []; }
+  try{ await withRetry(ensureFolders); }
+  catch(e){ const items = importQueue.splice(0); keepFailed(items, e && e.code === 'auth' ? 'auth' : 'net'); done += items.length; }
+
   // up to 2 images decoded at once (decoded straight to the target size), up to 3 uploads in flight
-  let next = 0, slots = 2, procMs = 0, upMs = 0; const slotWait = [];
+  let slots = 2; const slotWait = [];
   const encode = async it => {
     if(slots <= 0) await new Promise(r => slotWait.push(r));
     slots--; const t = performance.now();
     try{
       const info = it.info || (await exifInfo(it.file)) || nameInfo(it.file.name) || mtimeInfo(it.file);
-      const bmp = await decodeScaled(it.file, fullPx());
+      let bmp;
+      try{ bmp = await decodeScaled(it.file, fullPx()); }
+      catch(e){ await new Promise(r => setTimeout(r, 1500)); bmp = await decodeScaled(it.file, fullPx()); } // cloud photos can need a second read
       try{
         const full = await shrink(bmp, fullPx(), .86);
         const th = await shrink(bmp, THUMB_PX, .8);
         return {info, full, th};
       } finally { if(bmp.close) bmp.close(); }
-    } finally { procMs += performance.now() - t; slots++; const w = slotWait.shift(); if(w) w(); }
+    } catch(e){ throw {code:'read', text:String(e && e.message || e)}; }
+    finally { procMs += performance.now() - t; slots++; const w = slotWait.shift(); if(w) w(); }
   };
   const worker = async () => {
-    while(next < items.length && !authLost){
-      const it = items[next++];
+    while(importQueue.length && !authLost){
+      const it = importQueue.shift(); inFlight++;
       try{
         const {info, full, th} = await encode(it);
         const date = it.date || info.date;
@@ -942,31 +1015,32 @@ async function importFiles(items){
         ]);
         upMs += performance.now() - tu;
         try{ await idbPut('blobs', id, full.blob); await idbPut('blobs', thumb, th.blob); }catch(e){}
-        (byDate[date] ||= []).push({id, thumb, taken:`${info.date} ${info.time}`, w:full.w, h:full.h, addedAt: Date.now()});
-        ok++;
-      }catch(e){ if(e && e.code === 'auth') authLost = true; }
-      done++; step();
+        // record each photo as soon as it is in Drive, so nothing is lost if the app is closed mid-way
+        const entry = {id, thumb, taken:`${info.date} ${info.time}`, w:full.w, h:full.h, addedAt: Date.now()};
+        writeDay(date, cur => {
+          if(!cur.photos.length) return {...cur, photos: [entry]};
+          return {...cur, photos: [cur.photos[0], ...[...cur.photos.slice(1), entry].sort(sortByTaken)]};
+        });
+        days.add(date); ok++;
+      }catch(e){
+        const code = e && e.code;
+        if(code === 'auth'){ authLost = true; keepFailed([it], 'auth'); }
+        else keepFailed([it], code === 'read' ? 'read' : code === 'http' ? 'drive' : 'net');
+        console.warn('upload failed', e);
+      }
+      inFlight--; done++; step();
     }
   };
   await Promise.all([worker(), worker(), worker()]);
+  if(authLost){ const rest = importQueue.splice(0); keepFailed(rest, 'auth'); done += rest.length; }
   try{ if(wake) await wake.release(); }catch(e){}
-  const dates = Object.keys(byDate).sort();
-  for(const k of dates){
-    writeDay(k, cur => {
-      const add = byDate[k].sort(sortByTaken);
-      if(!cur.photos.length) return {...cur, photos: add};
-      return {...cur, photos: [cur.photos[0], ...[...cur.photos.slice(1), ...add].sort(sortByTaken)]};
-    });
-  }
-  if(dates.length) await syncNow();
-  importing = false; $('addBtn').classList.remove('busy'); $('addHere').classList.remove('busy'); $('upload').hidden = true;
-  const failed = total - ok, sec = Math.round((Date.now() - t0) / 1000);
-  const per = ms => (ms / Math.max(1, total) / 1000).toFixed(1);
-  let msg = ok ? `${ok}枚を${dates.length}日分に追加しました（${sec}秒／1枚あたり 処理${per(procMs)}秒・送信${per(upMs)}秒）` : '写真を追加できませんでした';
-  if(failed) msg += authLost ? `。ログインの期限が切れたため${failed}枚が未追加です。ログインし直してから追加してください`
-                             : `。${failed}枚は読み込めませんでした（HEICなど未対応の形式か通信エラー）`;
-  toast(msg, failed ? 7000 : 4000);
-  if(!openDate && dates.length){ const {y,m} = parseKey(dates[dates.length-1]); viewY = y; viewM = m; renderCal(); }
+  importing = false; $('upload').hidden = true;
+  const sec = Math.round((Date.now() - t0) / 1000), per = ms => (ms / Math.max(1, done) / 1000).toFixed(1);
+  if(ok) toast(`${ok}枚を${days.size}日分に追加しました（${sec}秒／1枚あたり 処理${per(procMs)}秒・送信${per(upMs)}秒）`, 5000);
+  showFail();
+  if(ok && !openDate){ const last = [...days].sort().pop(); const {y,m} = parseKey(last); viewY = y; viewM = m; renderCal(); }
+  if(ok) syncNow();
+  if(importQueue.length) runImports();
 }
 
 /* ---------------- Lightbox ---------------- */
@@ -1019,7 +1093,9 @@ $('lbDel').onclick = () => { $('lbDel').hidden = true; $('lbDelYes').hidden = fa
 $('lbDelYes').onclick = () => {
   const p = (local.days[openDate].photos || [])[lbIndex]; if(!p) return;
   writeDay(openDate, c => ({...c, photos: c.photos.filter(x => x.id !== p.id), removed: {...rmMap(c.removed), [p.id]: Date.now()}}));
-  for(const id of [p.id, p.thumb]) if(id){ idbDel('blobs', id).catch(()=>{}); if(hasToken()) trashFile(id); }
+  const ids = [p.id, p.thumb].filter(Boolean);
+  ids.forEach(id => { idbDel('blobs', id).catch(()=>{}); blobCache.delete(id); });
+  queueTrash(ids); if(hasToken()) flushTrash();
   toast(hasToken() ? '削除しました（ドライブのゴミ箱に移動）' : '削除しました');
 };
 /* ---- pinch / double-tap / wheel zoom, pan, and swipe between photos ---- */
@@ -1117,9 +1193,9 @@ $('stage').addEventListener('pointercancel', endPointer);
 $('stage').addEventListener('wheel', e => { e.preventDefault(); zoomAt(Z.s * Math.exp(-e.deltaY * 0.0015), e.clientX, e.clientY, false); }, {passive:false});
 window.addEventListener('resize', () => { if(lbIndex >= 0) applyZoom(false); });
 document.addEventListener('keydown', e => {
-  if(lbIndex >= 0){ if(e.key === 'ArrowLeft') lbGo(-1); else if(e.key === 'ArrowRight') lbGo(1); else if(e.key === 'Escape') closeLb(); return; }
+  if(lbIndex >= 0){ if(e.key === 'ArrowLeft') lbGo(-1); else if(e.key === 'ArrowRight') lbGo(1); else if(e.key === 'Escape') viaBack(closeLb)(); return; }
   if(/INPUT|TEXTAREA/.test(document.activeElement.tagName)) return;
-  if(e.key === 'Escape'){ if(!$('settings').hidden) closeSettings(); else if(!$('picker').hidden) closePicker(); else if(openDate) closeDay(); }
+  if(e.key === 'Escape'){ if(!$('settings').hidden) viaBack(closeSettings)(); else if(!$('picker').hidden) viaBack(closePicker)(); else if(openDate) viaBack(closeDay)(); }
 });
 /* Android back button closes overlays */
 function pushOverlay(){ try{ history.pushState({o:1}, ''); }catch(e){} }
@@ -1154,7 +1230,7 @@ $('loginBtn').onclick = login;
 $('clearCache').onclick = () => { $('clearCache').hidden = true; $('clearCacheYes').hidden = false; };
 $('clearCacheYes').onclick = async () => {
   try{ await idbClear('blobs'); }catch(e){}
-  urlCache.forEach(u => URL.revokeObjectURL(u)); urlCache.clear();
+  urlCache.forEach(u => URL.revokeObjectURL(u)); urlCache.clear(); blobCache.clear();
   $('clearCacheYes').hidden = true; $('clearCache').hidden = false; cacheInfo(); renderAll(); toast('キャッシュを削除しました');
 };
 
