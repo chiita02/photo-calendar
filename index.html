@@ -345,7 +345,7 @@ const idbClear = s => idbOp(s,'readwrite', st => st.clear());
 const idbCount = s => idbOp(s,'readonly', st => st.count());
 
 /* ---------------- Data model & merge ----------------
-   index = { version:1, days:{ "YYYY-MM-DD": {title, memo, photos:[{id,thumb,taken,w,h,addedAt}], removed:{id: ts}, updatedAt} },
+   index = { version:1, days:{ "YYYY-MM-DD": {title, memo, cover, photos:[{id,thumb,taken,w,h,addedAt}] (always by time), removed:{id: ts}, updatedAt} },
              deleted:{ "YYYY-MM-DD": ts } }                                  */
 const emptyIndex = () => ({version:1, days:{}, deleted:{}});
 let local = emptyIndex();
@@ -353,22 +353,33 @@ let dirty = false, editSeq = 0;
 
 /* removed: legacy array of ids (= removed at ts 1) or {id: ts}. A photo is shown unless it was
    removed after it was (re)added — so moving a photo away and back again works across devices. */
+/* Photos are kept in shooting order (ties broken by id so every device agrees).
+   The cover is stored separately; days saved by older versions used "first photo = cover", so keep that. */
+const sortByTaken = (a, b) => (a.taken||'').localeCompare(b.taken||'') || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+function orderDay(d){
+  if(!d) return d;
+  d.photos = d.photos || [];
+  if(!('cover' in d)) d.cover = d.photos.length ? d.photos[0].id : null;
+  d.photos.sort(sortByTaken);
+  return d;
+}
+const coverOf = d => d && d.photos && d.photos.length ? (d.photos.find(p => p.id === d.cover) || d.photos[0]) : null;
 function rmMap(r){ if(!r) return {}; if(Array.isArray(r)){ const o = {}; r.forEach(id => o[id] = 1); return o; } return {...r}; }
 function mergeDay(x, y){
-  if(!x) return clone(y); if(!y) return clone(x);
+  if(!x) return orderDay(clone(y)); if(!y) return orderDay(clone(x));
   const [n, o] = (x.updatedAt||0) >= (y.updatedAt||0) ? [x, y] : [y, x];
   const rm = rmMap(n.removed), ro = rmMap(o.removed);
   for(const k in ro) rm[k] = Math.max(rm[k] || 0, ro[k]);
   const oById = new Map((o.photos||[]).map(p => [p.id, p]));
   const have = new Set((n.photos||[]).map(p => p.id));
-  const extra = (o.photos||[]).filter(p => !have.has(p.id)).sort((a,b) => (a.taken||'').localeCompare(b.taken||''));
+  const extra = (o.photos||[]).filter(p => !have.has(p.id));
   const photos = [...(n.photos||[]), ...extra].map(p => {
     const q = oById.get(p.id);
     return q && (q.addedAt||0) > (p.addedAt||0) ? {...p, addedAt: q.addedAt} : p;
   }).filter(p => !(p.id in rm) || (p.addedAt||0) > rm[p.id]);
   const out = {...clone(n), photos: clone(photos)};
   if(Object.keys(rm).length) out.removed = rm; else delete out.removed;
-  return out;
+  return orderDay(out);
 }
 function merge(a, b){
   const out = emptyIndex();
@@ -389,13 +400,13 @@ function normalize(ix){
   return JSON.stringify(o);
 }
 const isEmptyDay = d => !d.title && !(d.memo||'').trim() && !(d.photos||[]).length;
-function blank(k){ return {date:k, title:'', memo:'', photos:[], removed:{}}; }
+function blank(k){ return {date:k, title:'', memo:'', cover:null, photos:[], removed:{}}; }
 
 async function saveLocal(){ try{ await idbPut('kv','index',local); await idbPut('kv','dirty',dirty); }catch(e){} }
 
 function writeDay(k, fn){
   const cur = clone(local.days[k] || blank(k));
-  const next = fn(cur); next.date = k; next.updatedAt = Date.now();
+  const next = orderDay(fn(cur)); next.date = k; next.updatedAt = Date.now();
   if(isEmptyDay(next)){ delete local.days[k]; local.deleted[k] = next.updatedAt; }
   else { local.days[k] = next; delete local.deleted[k]; }
   dirty = true; editSeq++;
@@ -574,22 +585,19 @@ function askDate(cur, cb){
   el.onchange = () => { if(el.value) cb(el.value); };
   try{ el.showPicker(); }catch(e){ el.focus(); el.click(); }
 }
-const sortByTaken = (a, b) => (a.taken||'').localeCompare(b.taken||'');
 function movePhotos(from, ids, to){
   if(!ids.length || from === to) return 0;
   const now = Date.now(); let moving = [];
   writeDay(from, c => {
     moving = c.photos.filter(p => ids.includes(p.id));
     const rm = rmMap(c.removed); ids.forEach(id => rm[id] = now);
-    return {...c, photos: c.photos.filter(p => !ids.includes(p.id)), removed: rm};
+    return {...c, cover: ids.includes(c.cover) ? null : c.cover, photos: c.photos.filter(p => !ids.includes(p.id)), removed: rm};
   });
   if(!moving.length) return 0;
   writeDay(to, c => {
     const rm = rmMap(c.removed); ids.forEach(id => delete rm[id]);
     const add = moving.map(p => ({...p, addedAt: now + 1}));
-    const rest = c.photos.filter(p => !ids.includes(p.id));
-    const photos = rest.length ? [rest[0], ...[...rest.slice(1), ...add].sort(sortByTaken)] : add.sort(sortByTaken);
-    return {...c, photos, removed: rm};
+    return {...c, photos: [...c.photos.filter(p => !ids.includes(p.id)), ...add], removed: rm};
   });
   const {m, d} = parseKey(to);
   toast(`${moving.length}枚を${m}月${d}日に移動しました`);
@@ -663,7 +671,7 @@ function renderCal(){
     const d = i-first+1;
     if(d<1 || d>n){ out.push('<div class="cell out"></div>'); continue; }
     const k = keyOf(viewY,viewM,d), b = local.days[k], w = i%7;
-    const ph = b && b.photos && b.photos[0];
+    const ph = coverOf(b);
     const cls = ['cell', w===0?'sun':w===6?'sat':'', ph?'has':'', b&&b.title?'titled':'', k===tk?'today':''].join(' ');
     const cnt = b && b.photos && b.photos.length ? `<span class="cnt">${b.photos.length}</span>` : '';
     const ttl = b && b.title ? esc(b.title) : '';
@@ -689,7 +697,7 @@ function contentKeys(){ return Object.keys(local.days).sort(); }
 function renderList(){
   const q = $('q').value.trim().toLowerCase();
   const keys = contentKeys().reverse().filter(k => !q || ((local.days[k].title||'') + ' ' + (local.days[k].memo||'')).toLowerCase().includes(q));
-  $('list').innerHTML = keys.length ? keys.map(k => { const b = local.days[k], ph = b.photos && b.photos[0];
+  $('list').innerHTML = keys.length ? keys.map(k => { const b = local.days[k], ph = coverOf(b);
     return `<button class="row" data-k="${k}"><div class="thumb" ${ph?`data-img="${ph.thumb||ph.id}"`:''}></div><div style="min-width:0"><div class="d">${fmtDate(k)} · ${(b.photos||[]).length}枚</div><div class="t">${esc(b.title||'（タイトルなし）')}</div>${b.memo?`<div class="m">${esc(b.memo)}</div>`:''}</div></button>`; }).join('')
     : `<div class="hint">${q ? '該当する記録はありません。' : 'まだ記録がありません。'}</div>`;
   hydrate($('list'));
@@ -726,7 +734,8 @@ function renderDay(){
   const ps = b.photos || [];
   if(shareSel) for(const id of [...shareSel]) if(!ps.some(p => p.id === id)) shareSel.delete(id);
   $('photos').classList.toggle('selecting', !!shareSel);
-  $('photos').innerHTML = ps.map((p,i) => `<button data-i="${i}" data-img="${p.thumb||p.id}" class="${shareSel && shareSel.has(p.id) ? 'on' : ''}" aria-label="写真 ${i+1}">${i===0?'<span class="cv">表紙</span>':''}${shareSel ? '<span class="chk"></span>' : ''}</button>`).join('');
+  const cov = coverOf(b);
+  $('photos').innerHTML = ps.map((p,i) => `<button data-i="${i}" data-img="${p.thumb||p.id}" class="${shareSel && shareSel.has(p.id) ? 'on' : ''}" aria-label="写真 ${i+1}">${cov && p.id === cov.id ?'<span class="cv">表紙</span>':''}${shareSel ? '<span class="chk"></span>' : ''}</button>`).join('');
   $('shareMode').hidden = !ps.length || !!shareSel;
   $('shareBar').hidden = !shareSel;
   if(shareSel){ $('shareCount').textContent = `${shareSel.size}枚を選択`; $('shareGo').disabled = $('moveGo').disabled = !shareSel.size; $('shareAll').textContent = shareSel.size === ps.length ? 'すべて解除' : 'すべて選択'; }
@@ -825,7 +834,8 @@ function closePicker(){
   if(!openDate && $('settings').hidden) document.body.style.overflow = '';
 }
 const pickDate = it => it.d || it.info.date;
-function resortPicks(){ picks.sort((a, b) => (pickDate(a) + a.info.date + a.info.time).localeCompare(pickDate(b) + b.info.date + b.info.time)); renderPicker(); }
+const pickKey = it => pickDate(it) + ' ' + it.info.date + ' ' + it.info.time + ':' + (it.info.sec || '00') + ' ' + String(it.n).padStart(5, '0');
+function resortPicks(){ picks.sort((a, b) => pickKey(a).localeCompare(pickKey(b))); renderPicker(); }
 function renderPicker(){
   const groups = {};
   picks.forEach((it, i) => { (groups[pickDate(it)] ||= []).push(i); });
@@ -894,15 +904,15 @@ function tiffDate(v, t){
   const t0 = tags(t + g32(t+4)); let s = null;
   if(t0[0x8769]){ const ex = tags(t + g32(t0[0x8769]+8)); if(ex[0x9003]) s = ascii(ex[0x9003]); else if(ex[0x9004]) s = ascii(ex[0x9004]); }
   if(!s && t0[0x0132]) s = ascii(t0[0x0132]);
-  const m = s && s.match(/^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2})/);
-  return m && m[1] !== '0000' ? {date:`${m[1]}-${m[2]}-${m[3]}`, time:`${m[4]}:${m[5]}`} : null;
+  const m = s && s.match(/^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2})(?::(\d{2}))?/);
+  return m && m[1] !== '0000' ? {date:`${m[1]}-${m[2]}-${m[3]}`, time:`${m[4]}:${m[5]}`, sec: m[6] || '00'} : null;
 }
 function nameInfo(name){
-  const m = name.match(/(20\d{2})(\d{2})(\d{2})[_-]?(\d{2})(\d{2})/);
+  const m = name.match(/(20\d{2})(\d{2})(\d{2})[_-]?(\d{2})(\d{2})(\d{2})?/);
   if(!m || +m[2] < 1 || +m[2] > 12 || +m[3] < 1 || +m[3] > 31) return null;
-  return {date:`${m[1]}-${m[2]}-${m[3]}`, time:`${m[4]}:${m[5]}`};
+  return {date:`${m[1]}-${m[2]}-${m[3]}`, time:`${m[4]}:${m[5]}`, sec: m[6] || '00'};
 }
-function mtimeInfo(f){ const d = new Date(f.lastModified || Date.now()); return {date:keyOf(d.getFullYear(), d.getMonth()+1, d.getDate()), time:`${pad(d.getHours())}:${pad(d.getMinutes())}`}; }
+function mtimeInfo(f){ const d = new Date(f.lastModified || Date.now()); return {date:keyOf(d.getFullYear(), d.getMonth()+1, d.getDate()), time:`${pad(d.getHours())}:${pad(d.getMinutes())}`, sec: pad(d.getSeconds())}; }
 async function shrink(bmp, max, q){
   const s = Math.min(1, max / Math.max(bmp.width, bmp.height));
   const w = Math.round(bmp.width*s), h = Math.round(bmp.height*s);
@@ -1016,11 +1026,8 @@ async function runImports(){
         upMs += performance.now() - tu;
         try{ await idbPut('blobs', id, full.blob); await idbPut('blobs', thumb, th.blob); }catch(e){}
         // record each photo as soon as it is in Drive, so nothing is lost if the app is closed mid-way
-        const entry = {id, thumb, taken:`${info.date} ${info.time}`, w:full.w, h:full.h, addedAt: Date.now()};
-        writeDay(date, cur => {
-          if(!cur.photos.length) return {...cur, photos: [entry]};
-          return {...cur, photos: [cur.photos[0], ...[...cur.photos.slice(1), entry].sort(sortByTaken)]};
-        });
+        const entry = {id, thumb, taken:`${info.date} ${info.time}:${info.sec || '00'}`, w:full.w, h:full.h, addedAt: Date.now()};
+        writeDay(date, cur => ({...cur, photos: [...cur.photos, entry]}));
         days.add(date); ok++;
       }catch(e){
         const code = e && e.code;
@@ -1065,19 +1072,19 @@ function renderLb(){
   }
   $('lbPick').hidden = true; $('lbShare').hidden = false; $('lbDate').hidden = false;
   const p = ps[lbIndex];
-  $('lbPos').textContent = `${lbIndex+1} / ${ps.length}${p.taken ? '  ·  ' + p.taken.slice(11) : ''}`;
+  $('lbPos').textContent = `${lbIndex+1} / ${ps.length}${p.taken ? '  ·  ' + p.taken.slice(11, 16) : ''}`;
   if($('lbImg').dataset.id !== p.id) resetZoom();
   $('lbImg').dataset.id = p.id;
   imgUrl(p.thumb).then(u => { if(u && $('lbImg').dataset.id === p.id && !$('lbImg').dataset.full) $('lbImg').src = u; });
   $('lbImg').dataset.full = '';
   imgUrl(p.id).then(u => { if(u && $('lbImg').dataset.id === p.id){ $('lbImg').src = u; $('lbImg').dataset.full = '1'; } });
-  $('lbCover').hidden = lbIndex === 0;
+  $('lbCover').hidden = p.id === (coverOf(local.days[openDate]) || {}).id;
   $('lbDel').hidden = false; $('lbDelYes').hidden = true;
   $('lbPrev').disabled = lbIndex === 0; $('lbNext').disabled = lbIndex === ps.length - 1;
 }
 function lbGo(d){ const ps = lbList(); const j = lbIndex + d; if(j >= 0 && j < ps.length){ lbIndex = j; renderLb(); } }
 $('lbClose').onclick = closeLb; $('lbPrev').onclick = () => lbGo(-1); $('lbNext').onclick = () => lbGo(1);
-$('lbCover').onclick = () => { const i = lbIndex; writeDay(openDate, c => { c.photos.unshift(c.photos.splice(i,1)[0]); return c; }); lbIndex = 0; renderLb(); toast('表紙にしました'); };
+$('lbCover').onclick = () => { const p = lbList()[lbIndex]; if(!p) return; writeDay(openDate, c => ({...c, cover: p.id})); toast('表紙にしました'); };
 $('lbPick').onclick = () => { const it = picks[lbIndex]; if(!it) return; setPick(it, !it.sel); renderPickCount(); renderLb(); };
 $('lbDate').onclick = () => {
   if(lbMode === 'pick'){
@@ -1237,7 +1244,7 @@ $('clearCacheYes').onclick = async () => {
 /* ---------------- Boot ---------------- */
 (async () => {
   try{
-    const ix = await idbGet('kv','index'); if(ix && ix.days) local = ix;
+    const ix = await idbGet('kv','index'); if(ix && ix.days){ Object.values(ix.days).forEach(orderDay); local = ix; }
     dirty = !!(await idbGet('kv','dirty'));
   }catch(e){}
   renderAll();
