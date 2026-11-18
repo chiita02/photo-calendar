@@ -115,6 +115,15 @@ header.top h1{font-size:20px;margin:0;font-weight:700;letter-spacing:.02em;flex:
 .lb .nav:disabled{opacity:.2}
 .lb .nav.l{left:max(8px,env(safe-area-inset-left,0px))} .lb .nav.r{right:max(8px,env(safe-area-inset-right,0px))}
 @media (hover:none){.lb .nav{display:none}}
+.lb .bar{transition:opacity .2s}
+@media (orientation: landscape) and (max-height: 600px){
+  .lb{padding:0}
+  .lb .bar{position:absolute;top:0;left:0;right:0;z-index:2;background:linear-gradient(rgba(0,0,0,.65),rgba(0,0,0,0));
+    padding-top:max(8px,env(safe-area-inset-top,0px));padding-bottom:20px}
+  .lb.chrome-off .bar{opacity:0;pointer-events:none}
+  .lb .stage{height:100%}
+  .lb .zoomhint{display:none}
+}
 
 .pick-group{display:flex;flex-direction:column;gap:8px}
 .pick-head{display:flex;align-items:center;gap:8px;position:sticky;top:0;background:var(--bg);padding:6px 0;z-index:1}
@@ -1053,8 +1062,33 @@ async function runImports(){
 /* ---------------- Lightbox ---------------- */
 let lbIndex = -1, lbMode = 'day';
 const lbList = () => lbMode === 'pick' ? picks : ((local.days[openDate] || {}).photos || []);
-function openLb(i, mode){ lbMode = mode || 'day'; lbIndex = i; $('lb').hidden = false; renderLb(); }
-function closeLb(){ resetZoom(); $('lbImg').dataset.id = ''; lbIndex = -1; $('lb').hidden = true; $('lbImg').removeAttribute('src'); }
+function openLb(i, mode){ lbMode = mode || 'day'; lbIndex = i; $('lb').hidden = false; renderLb(); lbChrome(true); lbFullscreen(); }
+function closeLb(){ resetZoom(); $('lbImg').dataset.id = ''; lbIndex = -1; $('lb').hidden = true; $('lbImg').removeAttribute('src'); lbExitFullscreen(); }
+
+/* ---- landscape: full screen photo, toolbar shown on tap ---- */
+const landscapeMQ = matchMedia('(orientation: landscape) and (max-height: 600px)');
+let lbChromeT = null, lbTapT = null, lbFs = false;
+function lbChrome(show){
+  clearTimeout(lbChromeT);
+  $('lb').classList.toggle('chrome-off', !show);
+  if(show && landscapeMQ.matches) lbChromeT = setTimeout(() => $('lb').classList.add('chrome-off'), 3000);
+}
+// Browsers only allow full screen right after a tap, so this runs on opening and on any touch in the viewer
+function lbFullscreen(){
+  if(lbIndex < 0 || !landscapeMQ.matches || document.fullscreenElement || !document.documentElement.requestFullscreen) return;
+  document.documentElement.requestFullscreen({navigationUI: 'hide'}).then(() => { lbFs = true; }).catch(() => {});
+}
+function lbExitFullscreen(){
+  if(lbFs && document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {});
+  lbFs = false;
+}
+document.addEventListener('fullscreenchange', () => { if(!document.fullscreenElement) lbFs = false; });
+landscapeMQ.addEventListener('change', () => {
+  if(lbIndex < 0) return;
+  if(landscapeMQ.matches) lbChrome(true);          // rotated to landscape: show the bar briefly, then hide
+  else { lbChrome(true); lbExitFullscreen(); }     // back to portrait: normal layout
+});
+$('lb').querySelector('.bar').addEventListener('pointerdown', () => lbChrome(true));
 function renderLb(){
   const ps = lbList();
   if(!ps.length){ closeLb(); return; }
@@ -1148,6 +1182,7 @@ function startGesture(){
 }
 $('stage').addEventListener('pointerdown', e => {
   if(e.target.closest('button')) return;
+  lbFullscreen();
   $('stage').setPointerCapture(e.pointerId);
   ptrs.set(e.pointerId, {x: e.clientX, y: e.clientY});
   startGesture();
@@ -1189,9 +1224,14 @@ function endPointer(e){
   if(g && !g.moved && e.type === 'pointerup'){
     const now = Date.now();
     if(now - lastTap.t < 300 && Math.hypot(last.x - lastTap.x, last.y - lastTap.y) < 30){
+      clearTimeout(lbTapT);
       if(Z.s > 1) { Z.s = 1; applyZoom(true); } else zoomAt(2.5, last.x, last.y, true);
       lastTap.t = 0;
-    } else lastTap = {t: now, x: last.x, y: last.y};
+    } else {
+      lastTap = {t: now, x: last.x, y: last.y};
+      clearTimeout(lbTapT);   // single tap (not the start of a double tap): show / hide the toolbar
+      lbTapT = setTimeout(() => lbChrome($('lb').classList.contains('chrome-off')), 300);
+    }
   }
   startGesture();
 }
